@@ -11,20 +11,26 @@ def run(url, domain, timeout=10):
 
     try:
         ctx = ssl.create_default_context()
-        # Allow all TLS versions for detection purposes (security reconnaissance)
-        ctx.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         conn = ctx.wrap_socket(socket.create_connection((domain, 443), timeout=timeout), server_hostname=domain)
         cert = conn.getpeercert()
         protocol = conn.version()
         conn.close()
+    except ssl.SSLError as e:
+        err_str = str(e)
+        if "UNSUPPORTED_PROTOCOL" in err_str or "VERSION_TOO_LOW" in err_str or "wrong version" in err_str.lower():
+            warn("Server may be using an insecure TLS version (< TLS 1.2)!")
+            results["tls_warning"] = "Server appears to use TLS < 1.2"
+        warn(f"SSL error on initial connect: {e}")
+        protocol = "Unknown (connection error)"
+        cert = None
     except ssl.SSLCertVerificationError as e:
         warn(f"SSL certificate verification failed: {e}")
         try:
             ctx2 = ssl.create_default_context()
             ctx2.check_hostname = False
             ctx2.verify_mode = ssl.CERT_NONE
-            # Allow all TLS versions for detection purposes (security reconnaissance)
-            ctx2.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+            ctx2.minimum_version = ssl.TLSVersion.TLSv1_2
             conn2 = ctx2.wrap_socket(socket.create_connection((domain, 443), timeout=timeout), server_hostname=domain)
             cert = conn2.getpeercert()
             protocol = conn2.version()
@@ -35,6 +41,10 @@ def run(url, domain, timeout=10):
     except Exception as e:
         error(f"SSL connection failed: {e}")
         return {"error": str(e)}
+
+    if not cert:
+        info("Protocol", protocol)
+        return results
 
     # Subject
     subject = dict(x[0] for x in cert.get("subject", []))
