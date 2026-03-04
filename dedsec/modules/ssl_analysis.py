@@ -11,6 +11,8 @@ def run(url, domain, timeout=10):
 
     try:
         ctx = ssl.create_default_context()
+        # Allow all TLS versions for detection purposes (security reconnaissance)
+        ctx.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
         conn = ctx.wrap_socket(socket.create_connection((domain, 443), timeout=timeout), server_hostname=domain)
         cert = conn.getpeercert()
         protocol = conn.version()
@@ -21,6 +23,8 @@ def run(url, domain, timeout=10):
             ctx2 = ssl.create_default_context()
             ctx2.check_hostname = False
             ctx2.verify_mode = ssl.CERT_NONE
+            # Allow all TLS versions for detection purposes (security reconnaissance)
+            ctx2.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
             conn2 = ctx2.wrap_socket(socket.create_connection((domain, 443), timeout=timeout), server_hostname=domain)
             cert = conn2.getpeercert()
             protocol = conn2.version()

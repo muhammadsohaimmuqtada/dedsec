@@ -33,7 +33,10 @@ def run(url, domain, timeout=10):
                 verify=False,
             )
             location = resp.headers.get("Location", "")
-            if location and ("evil.com" in location or EVIL_URL in location):
+            # Parse the redirect location to check if it goes to evil.com (exact host match)
+            from urllib.parse import urlparse as _urlparse
+            loc_host = _urlparse(location).hostname or ""
+            if location and (loc_host == "evil.com" or loc_host.endswith(".evil.com")):
                 warn(f"VULNERABLE! Parameter '{param}' redirects to: {location}")
                 vulnerable.append({"param": param, "url": test_url, "location": location})
             else:
