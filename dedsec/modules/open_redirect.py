@@ -1,5 +1,6 @@
 import requests
 import urllib3
+from urllib.parse import urlparse as _urlparse
 from dedsec.core.utils import safe_request, section, info, warn, error
 from dedsec.core.colors import Colors
 
@@ -34,7 +35,6 @@ def run(url, domain, timeout=10):
             )
             location = resp.headers.get("Location", "")
             # Parse the redirect location to check if it goes to evil.com (exact host match)
-            from urllib.parse import urlparse as _urlparse
             loc_host = _urlparse(location).hostname or ""
             if location and (loc_host == "evil.com" or loc_host.endswith(".evil.com")):
                 warn(f"VULNERABLE! Parameter '{param}' redirects to: {location}")

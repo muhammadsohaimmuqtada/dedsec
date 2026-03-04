@@ -1,14 +1,18 @@
 from dedsec.core.utils import section, info, warn, error
 from dedsec.core.colors import Colors
 
+try:
+    import whois
+    _WHOIS_AVAILABLE = True
+except ImportError:
+    _WHOIS_AVAILABLE = False
+
 
 def run(url, domain, timeout=10):
     section("WHOIS Lookup", "🕵️")
     results = {}
 
-    try:
-        import whois
-    except ImportError:
+    if not _WHOIS_AVAILABLE:
         error("python-whois not installed. Run: pip install python-whois")
         return {"error": "python-whois not installed"}
 

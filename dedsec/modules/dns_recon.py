@@ -3,17 +3,21 @@ from dedsec.core.colors import Colors
 
 RECORD_TYPES = ["A", "AAAA", "MX", "NS", "TXT", "CNAME", "SOA"]
 
+try:
+    import dns.resolver
+    import dns.zone
+    import dns.query
+    import dns.exception
+    _DNS_AVAILABLE = True
+except ImportError:
+    _DNS_AVAILABLE = False
+
 
 def run(url, domain, timeout=10):
     section("DNS Reconnaissance", "🔍")
     results = {}
 
-    try:
-        import dns.resolver
-        import dns.zone
-        import dns.query
-        import dns.exception
-    except ImportError:
+    if not _DNS_AVAILABLE:
         error("dnspython not installed. Run: pip install dnspython")
         return {"error": "dnspython not installed"}
 

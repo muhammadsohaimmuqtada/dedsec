@@ -102,8 +102,8 @@ def run(url, domain, timeout=10):
             print(f"    SameSite: {Colors.YELLOW}⚠ None{Colors.RESET}  ← cross-site requests allowed")
             issues.append("SameSite=None — cookie sent on all cross-site requests (CSRF risk)")
         else:
-            print(f"    SameSite: {Colors.RED}✘ {samesite}{Colors.RESET}  ← CSRF risk (no SameSite protection)")
-            issues.append(f"Missing SameSite attribute — susceptible to CSRF attacks")
+            print(f"    SameSite: {Colors.RED}✘ Not Set{Colors.RESET}  ← CSRF risk (no SameSite protection)")
+            issues.append("Missing SameSite attribute — susceptible to CSRF attacks")
 
         entry = {
             "name": name,
