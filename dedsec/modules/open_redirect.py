@@ -1,56 +1,85 @@
-import requests
-import urllib3
-from urllib.parse import urlparse as _urlparse
-from dedsec.core.utils import safe_request, section, info, warn, error
-from dedsec.core.colors import Colors
+from urllib.parse import urlparse
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from dedsec.core.colors import Colors
+from dedsec.core.utils import append_query_param, info, safe_request, section, warn
 
 REDIRECT_PARAMS = [
-    "url", "redirect", "next", "redir", "return", "returnTo", "redirect_uri",
-    "continue", "dest", "go", "target", "out", "view", "login", "callback",
+    "url",
+    "redirect",
+    "next",
+    "redir",
+    "return",
+    "returnTo",
+    "redirect_uri",
+    "continue",
+    "dest",
+    "go",
+    "target",
+    "out",
+    "view",
+    "login",
+    "callback",
 ]
 
-EVIL_URL = "https://evil.com"
+ATTACKER_URL = "https://evil.example"
+
+
+def _location_host(resp):
+    location = resp.headers.get("Location", "") if resp else ""
+    return location, (urlparse(location).hostname or "").lower()
+
+
+def _is_external_redirect(host, domain):
+    return bool(host and host != domain and not host.endswith(f".{domain}"))
 
 
 def run(url, domain, timeout=10):
     section("Open Redirect Check", "🚪")
-    results = {"vulnerable": [], "tested": [], "errors": []}
-
-    headers = {"User-Agent": "DEDSEC-Recon/1.0"}
-    vulnerable = []
-    tested = []
+    results = {"confirmed": [], "candidates": [], "tested": 0}
 
     for param in REDIRECT_PARAMS:
-        test_url = f"{url}?{param}={EVIL_URL}"
-        tested.append(test_url)
-        try:
-            resp = requests.get(
-                test_url,
-                headers=headers,
-                timeout=timeout,
-                allow_redirects=False,
-                verify=False,
-            )
-            location = resp.headers.get("Location", "")
-            # Parse the redirect location to check if it goes to evil.com (exact host match)
-            loc_host = _urlparse(location).hostname or ""
-            if location and (loc_host == "evil.com" or loc_host.endswith(".evil.com")):
-                warn(f"VULNERABLE! Parameter '{param}' redirects to: {location}")
-                vulnerable.append({"param": param, "url": test_url, "location": location})
-            else:
-                print(f"{Colors.DIM}[ ] {param}: {resp.status_code} — not vulnerable{Colors.RESET}")
-        except Exception as e:
-            print(f"{Colors.DIM}[ ] {param}: error — {e}{Colors.RESET}")
-            results["errors"].append({"param": param, "error": str(e)})
+        attack_url = append_query_param(url, param, ATTACKER_URL)
+        control_url = append_query_param(url, param, f"https://{domain}/")
+        results["tested"] += 1
 
-    if vulnerable:
-        error(f"Found {len(vulnerable)} open redirect(s)!")
+        attack_resp = safe_request(attack_url, timeout=timeout, allow_redirects=False)
+        if not attack_resp:
+            print(f"{Colors.DIM}[ ] {param}: request failed{Colors.RESET}")
+            continue
+
+        attack_location, attack_host = _location_host(attack_resp)
+        if attack_resp.status_code not in {301, 302, 303, 307, 308}:
+            print(f"{Colors.DIM}[ ] {param}: {attack_resp.status_code} (no redirect){Colors.RESET}")
+            continue
+
+        if not _is_external_redirect(attack_host, domain):
+            print(f"{Colors.DIM}[ ] {param}: redirects internally{Colors.RESET}")
+            continue
+
+        control_resp = safe_request(control_url, timeout=timeout, allow_redirects=False)
+        control_location, control_host = _location_host(control_resp) if control_resp else ("", "")
+
+        finding = {
+            "param": param,
+            "attack_url": attack_url,
+            "status": attack_resp.status_code,
+            "location": attack_location,
+            "control_location": control_location,
+        }
+
+        if control_resp and control_resp.status_code in {301, 302, 303, 307, 308} and control_host == domain:
+            warn(f"CONFIRMED: parameter '{param}' performs external redirect to {attack_host}")
+            results["confirmed"].append(finding)
+        else:
+            print(f"{Colors.DIM}[~] candidate: {param} redirects externally but control behavior is inconsistent{Colors.RESET}")
+            results["candidates"].append(finding)
+
+    if results["confirmed"]:
+        info("Confirmed Open Redirects", str(len(results["confirmed"])))
     else:
-        info("Result", f"{Colors.GREEN}No open redirects detected (passive check){Colors.RESET}")
+        info("Confirmed Open Redirects", f"{Colors.GREEN}0{Colors.RESET}")
 
-    results["vulnerable"] = vulnerable
-    results["tested"] = tested
-    results["total_tested"] = len(REDIRECT_PARAMS)
+    if results["candidates"]:
+        warn(f"{len(results['candidates'])} redirect candidate(s) require manual validation.")
+
     return results

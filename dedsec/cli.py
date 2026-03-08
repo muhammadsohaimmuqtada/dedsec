@@ -20,7 +20,25 @@ MODULE_MAP = {
     "whois":      ("dedsec.modules.whois_lookup",     "🕵️  WHOIS Lookup"),
     "subdomains": ("dedsec.modules.subdomain_enum",   "🌐 Subdomain Enumeration"),
     "js":         ("dedsec.modules.js_extraction",    "📜 JS & Endpoint Extraction"),
+    "hosting":    ("dedsec.modules.hosting_intel",    "🏢 Hosting Intelligence"),
+    "exposures":  ("dedsec.modules.exposure_checks",  "🚨 Common Exposure Checks"),
 }
+
+MARKET_PROFILE_MODULES = [
+    "waf",
+    "tech",
+    "dns",
+    "geo",
+    "hosting",
+    "ssl",
+    "redirect",
+    "robots",
+    "ports",
+    "whois",
+    "subdomains",
+    "js",
+    "exposures",
+]
 
 def main():
     print_banner()
@@ -41,6 +59,11 @@ def main():
     parser.add_argument("--timeout", type=int, default=10, help="Request timeout in seconds (default: 10)")
     parser.add_argument("--output", default=None, help="Save report to file")
     parser.add_argument("--json", action="store_true", help="Output results in JSON format")
+    parser.add_argument(
+        "--market",
+        action="store_true",
+        help="Run curated market-ready recon profile (high-signal modules, excludes header-only checks)",
+    )
     parser.add_argument("--version", action="version", version=f"DEDSEC v{__version__}")
 
     args = parser.parse_args()
@@ -54,7 +77,10 @@ def main():
         error("Could not extract domain from URL.")
         sys.exit(1)
 
-    selected = list(MODULE_MAP.keys()) if "all" in args.modules else args.modules
+    if args.market:
+        selected = MARKET_PROFILE_MODULES
+    else:
+        selected = list(MODULE_MAP.keys()) if "all" in args.modules else args.modules
 
     print(f"  Target URL : {url}")
     print(f"  Domain     : {domain}")

@@ -7,3 +7,14 @@ build/
 .eggs/
 *.pyc
 .env
+.venv/
+venv/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.log
+report*.json
+dedsec.egg-info/

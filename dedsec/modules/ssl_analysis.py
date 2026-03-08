@@ -1,116 +1,155 @@
-import ssl
 import socket
+import ssl
 from datetime import datetime, timezone
-from dedsec.core.utils import section, info, warn, error
+
 from dedsec.core.colors import Colors
+from dedsec.core.utils import error, info, section, warn
+
+TLS_PROBES = [
+    ("TLSv1.0", "TLSv1"),
+    ("TLSv1.1", "TLSv1_1"),
+    ("TLSv1.2", "TLSv1_2"),
+    ("TLSv1.3", "TLSv1_3"),
+]
+
+
+def _parse_cert_date(raw):
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _connect(domain, timeout, insecure=False):
+    context = ssl.create_default_context()
+    if insecure:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    sock = socket.create_connection((domain, 443), timeout=timeout)
+    conn = context.wrap_socket(sock, server_hostname=domain)
+    cert = conn.getpeercert()
+    tls_version = conn.version()
+    cipher = conn.cipher()
+    conn.close()
+    return cert, tls_version, cipher
+
+
+def _probe_protocol(domain, timeout, version_attr):
+    if not hasattr(ssl.TLSVersion, version_attr):
+        return {"supported": False, "status": "unsupported-by-runtime"}
+    version = getattr(ssl.TLSVersion, version_attr)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.minimum_version = version
+    context.maximum_version = version
+    try:
+        sock = socket.create_connection((domain, 443), timeout=min(timeout, 4))
+        conn = context.wrap_socket(sock, server_hostname=domain)
+        negotiated = conn.version()
+        conn.close()
+        return {"supported": True, "status": "ok", "negotiated": negotiated}
+    except Exception:
+        return {"supported": False, "status": "blocked-or-unsupported"}
 
 
 def run(url, domain, timeout=10):
     section("SSL/TLS Analysis", "🔒")
-    results = {}
+    results = {"risks": [], "protocol_support": {}}
 
     try:
-        ctx = ssl.create_default_context()
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        conn = ctx.wrap_socket(socket.create_connection((domain, 443), timeout=timeout), server_hostname=domain)
-        cert = conn.getpeercert()
-        protocol = conn.version()
-        conn.close()
-    except ssl.SSLError as e:
-        err_str = str(e)
-        if "UNSUPPORTED_PROTOCOL" in err_str or "VERSION_TOO_LOW" in err_str or "wrong version" in err_str.lower():
-            warn("Server may be using an insecure TLS version (< TLS 1.2)!")
-            results["tls_warning"] = "Server appears to use TLS < 1.2"
-        warn(f"SSL error on initial connect: {e}")
-        protocol = "Unknown (connection error)"
-        cert = None
-    except ssl.SSLCertVerificationError as e:
-        warn(f"SSL certificate verification failed: {e}")
+        cert, protocol, cipher = _connect(domain, timeout, insecure=False)
+        hostname_valid = True
+    except ssl.SSLCertVerificationError as exc:
+        warn(f"Certificate verification failed: {exc}")
+        results["risks"].append("Certificate verification failure")
         try:
-            ctx2 = ssl.create_default_context()
-            ctx2.check_hostname = False
-            ctx2.verify_mode = ssl.CERT_NONE
-            ctx2.minimum_version = ssl.TLSVersion.TLSv1_2
-            conn2 = ctx2.wrap_socket(socket.create_connection((domain, 443), timeout=timeout), server_hostname=domain)
-            cert = conn2.getpeercert()
-            protocol = conn2.version()
-            conn2.close()
-        except Exception as e2:
-            error(f"Could not connect via SSL: {e2}")
-            return {"error": str(e2)}
-    except Exception as e:
-        error(f"SSL connection failed: {e}")
-        return {"error": str(e)}
+            cert, protocol, cipher = _connect(domain, timeout, insecure=True)
+            hostname_valid = False
+        except Exception as inner_exc:
+            error(f"Could not establish TLS connection: {inner_exc}")
+            return {"error": str(inner_exc)}
+    except Exception as exc:
+        error(f"TLS connection failed: {exc}")
+        return {"error": str(exc)}
 
     if not cert:
-        info("Protocol", protocol)
+        warn("No certificate data received.")
         return results
 
-    # Subject
-    subject = dict(x[0] for x in cert.get("subject", []))
-    issuer  = dict(x[0] for x in cert.get("issuer", []))
-    cn      = subject.get("commonName", "N/A")
-    org     = subject.get("organizationName", "N/A")
-    issuer_cn = issuer.get("commonName", "N/A")
-    issuer_org = issuer.get("organizationName", "N/A")
+    subject = dict(item[0] for item in cert.get("subject", []))
+    issuer = dict(item[0] for item in cert.get("issuer", []))
+    cn = subject.get("commonName", "N/A")
+    sans = [value for kind, value in cert.get("subjectAltName", []) if kind == "DNS"]
+    valid_from_raw = cert.get("notBefore", "")
+    valid_until_raw = cert.get("notAfter", "")
+    valid_from = _parse_cert_date(valid_from_raw)
+    valid_until = _parse_cert_date(valid_until_raw)
 
-    # Dates
-    not_before_str = cert.get("notBefore", "")
-    not_after_str  = cert.get("notAfter", "")
-    fmt = "%b %d %H:%M:%S %Y %Z"
+    info("TLS Version", protocol or "Unknown")
+    if cipher:
+        info("Cipher", f"{cipher[0]} ({cipher[1]}, {cipher[2]} bits)")
+    info("Common Name", cn)
+    info("Issuer", issuer.get("commonName", "N/A"))
+    info("Valid From", valid_from_raw or "N/A")
+    info("Valid Until", valid_until_raw or "N/A")
+    info("Hostname Validation", "PASS" if hostname_valid else "FAILED")
+
     now = datetime.now(timezone.utc)
-
-    try:
-        not_before = datetime.strptime(not_before_str, fmt).replace(tzinfo=timezone.utc)
-        not_after  = datetime.strptime(not_after_str,  fmt).replace(tzinfo=timezone.utc)
-        days_left  = (not_after - now).days
-    except Exception:
-        not_before = not_after = None
-        days_left = None
-
-    serial = cert.get("serialNumber", "N/A")
-
-    info("Common Name",    cn)
-    info("Organization",   org)
-    info("Issuer",         f"{issuer_cn} ({issuer_org})")
-    info("Valid From",     not_before_str)
-    info("Valid Until",    not_after_str)
-    info("Protocol",       protocol)
-    info("Serial Number",  serial)
-
-    if days_left is not None:
+    days_left = None
+    if valid_until:
+        days_left = (valid_until - now).days
         if days_left < 0:
-            error(f"Certificate EXPIRED {abs(days_left)} days ago!")
+            error(f"Certificate expired {abs(days_left)} days ago.")
+            results["risks"].append("Certificate expired")
         elif days_left < 30:
-            warn(f"Certificate expires in {days_left} days — renew soon!")
-        elif days_left < 90:
             warn(f"Certificate expires in {days_left} days.")
+            results["risks"].append("Certificate expires soon")
         else:
-            info("Days Until Expiry", f"{Colors.GREEN}{days_left}{Colors.RESET}")
+            info("Days Until Expiry", str(days_left))
 
-    # SANs
-    sans = []
-    for san_type, san_value in cert.get("subjectAltName", []):
-        if san_type == "DNS":
-            sans.append(san_value)
-    displayed_sans = sans[:20]
-    if displayed_sans:
+    if protocol in {"TLSv1", "TLSv1.1"}:
+        warn("Insecure TLS protocol negotiated.")
+        results["risks"].append(f"Insecure negotiated protocol: {protocol}")
+
+    weak_cipher_markers = ["RC4", "3DES", "DES", "NULL", "MD5"]
+    if cipher and any(marker in cipher[0].upper() for marker in weak_cipher_markers):
+        warn(f"Weak cipher detected: {cipher[0]}")
+        results["risks"].append(f"Weak cipher: {cipher[0]}")
+
+    for label, attr in TLS_PROBES:
+        probe = _probe_protocol(domain, timeout, attr)
+        results["protocol_support"][label] = probe
+
+    if results["protocol_support"].get("TLSv1.0", {}).get("supported"):
+        warn("Server still supports TLSv1.0.")
+        results["risks"].append("TLSv1.0 supported")
+    if results["protocol_support"].get("TLSv1.1", {}).get("supported"):
+        warn("Server still supports TLSv1.1.")
+        results["risks"].append("TLSv1.1 supported")
+
+    if sans:
         print(f"{Colors.GREEN}[+]{Colors.RESET} {Colors.BOLD}SANs ({len(sans)} total):{Colors.RESET}")
-        for s in displayed_sans:
-            print(f"       {Colors.DIM}• {s}{Colors.RESET}")
-        if len(sans) > 20:
-            print(f"       {Colors.DIM}... and {len(sans)-20} more{Colors.RESET}")
+        for san in sans[:15]:
+            print(f"       {Colors.DIM}• {san}{Colors.RESET}")
+        if len(sans) > 15:
+            print(f"       {Colors.DIM}... and {len(sans)-15} more{Colors.RESET}")
 
-    results = {
-        "cn": cn,
-        "org": org,
-        "issuer": f"{issuer_cn} ({issuer_org})",
-        "valid_from": not_before_str,
-        "valid_until": not_after_str,
-        "days_left": days_left,
-        "protocol": protocol,
-        "serial": serial,
-        "sans": sans[:20],
-        "san_count": len(sans),
-    }
+    results.update(
+        {
+            "cn": cn,
+            "issuer": issuer.get("commonName", "N/A"),
+            "valid_from": valid_from_raw,
+            "valid_until": valid_until_raw,
+            "days_left": days_left,
+            "protocol": protocol,
+            "cipher": cipher[0] if cipher else None,
+            "cipher_bits": cipher[2] if cipher else None,
+            "hostname_valid": hostname_valid,
+            "san_count": len(sans),
+            "sans": sans[:15],
+        }
+    )
     return results

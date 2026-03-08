@@ -1,54 +1,98 @@
 import json
-import requests
-from dedsec.core.utils import section, info, warn, error
+import socket
+
 from dedsec.core.colors import Colors
+from dedsec.core.utils import info, safe_request, section, warn
+
+MAX_CRT_RESULTS = 300
+MAX_DISPLAY = 50
+
+
+def _resolve(subdomain):
+    try:
+        return socket.gethostbyname(subdomain)
+    except Exception:
+        return None
+
+
+def _probe_alive(subdomain, timeout):
+    for scheme in ("https", "http"):
+        target = f"{scheme}://{subdomain}"
+        resp = safe_request(target, timeout=timeout, allow_redirects=False)
+        if resp and resp.status_code < 500:
+            return {"url": target, "status": resp.status_code}
+    return None
 
 
 def run(url, domain, timeout=10):
     section("Subdomain Enumeration", "🌐")
-    results = {"subdomains": [], "count": 0}
+    results = {
+        "source": "crt.sh (Certificate Transparency)",
+        "discovered_count": 0,
+        "resolved_count": 0,
+        "alive_count": 0,
+        "resolved": [],
+        "alive": [],
+    }
 
-    # Use crt.sh (Certificate Transparency)
     api_url = f"https://crt.sh/?q=%.{domain}&output=json"
-    try:
-        resp = requests.get(api_url, timeout=timeout)
-        data = resp.json()
-    except requests.exceptions.Timeout:
-        error("crt.sh request timed out.")
+    resp = safe_request(api_url, timeout=timeout)
+    if not resp:
+        warn("crt.sh lookup failed.")
         return results
-    except json.JSONDecodeError:
-        error("Failed to parse crt.sh response.")
-        return results
-    except Exception as e:
-        error(f"crt.sh lookup failed: {e}")
-        return {"error": str(e)}
 
-    subdomains = set()
-    for entry in data:
+    try:
+        data = resp.json()
+    except json.JSONDecodeError:
+        warn("crt.sh response was not valid JSON.")
+        return results
+
+    discovered = set()
+    for entry in data[:MAX_CRT_RESULTS]:
         names = entry.get("name_value", "")
         for name in names.splitlines():
-            name = name.strip().lower()
-            # Filter wildcards and root domain
-            if name.startswith("*."):
-                name = name[2:]
-            if name == domain or name == f"www.{domain}":
+            candidate = name.strip().lower()
+            if candidate.startswith("*."):
+                candidate = candidate[2:]
+            if not candidate.endswith(f".{domain}"):
                 continue
-            if name.endswith(f".{domain}") and name:
-                subdomains.add(name)
+            if candidate in {domain, f"www.{domain}"}:
+                continue
+            discovered.add(candidate)
 
-    sorted_subs = sorted(subdomains)[:50]
-
-    if sorted_subs:
-        info("Unique Subdomains Found", str(len(subdomains)))
-        print(f"{Colors.GREEN}[+]{Colors.RESET} {Colors.BOLD}Subdomains (showing up to 50):{Colors.RESET}")
-        for sub in sorted_subs:
-            print(f"       {Colors.CYAN}• {sub}{Colors.RESET}")
-        if len(subdomains) > 50:
-            warn(f"Showing 50 of {len(subdomains)} total subdomains.")
-    else:
+    results["discovered_count"] = len(discovered)
+    if not discovered:
         warn("No subdomains found via certificate transparency.")
+        return results
 
-    results["subdomains"] = sorted_subs
-    results["count"] = len(subdomains)
-    results["source"] = "crt.sh (Certificate Transparency)"
+    info("Discovered (raw)", str(len(discovered)))
+    resolved = []
+    alive = []
+
+    for subdomain in sorted(discovered):
+        ip = _resolve(subdomain)
+        if not ip:
+            continue
+        resolved.append({"subdomain": subdomain, "ip": ip})
+        probe = _probe_alive(subdomain, timeout)
+        if probe:
+            alive.append({"subdomain": subdomain, "ip": ip, "url": probe["url"], "status": probe["status"]})
+
+    results["resolved_count"] = len(resolved)
+    results["alive_count"] = len(alive)
+    results["resolved"] = resolved[:MAX_DISPLAY]
+    results["alive"] = alive[:MAX_DISPLAY]
+
+    info("Resolved", str(len(resolved)))
+    info("Alive Web Hosts", str(len(alive)))
+
+    if alive:
+        print(f"{Colors.GREEN}[+]{Colors.RESET} {Colors.BOLD}Validated subdomains (showing up to {MAX_DISPLAY}):{Colors.RESET}")
+        for item in alive[:MAX_DISPLAY]:
+            print(f"       {Colors.CYAN}• {item['subdomain']} -> {item['ip']} ({item['status']}){Colors.RESET}")
+        if len(alive) > MAX_DISPLAY:
+            warn(f"Showing {MAX_DISPLAY} of {len(alive)} alive subdomains.")
+    else:
+        warn("No live web subdomains validated.")
+
     return results
