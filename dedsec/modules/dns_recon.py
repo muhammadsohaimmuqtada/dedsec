@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dedsec.core.colors import Colors
 from dedsec.core.utils import error, info, section, warn
 
@@ -13,6 +14,21 @@ try:
     _DNS_AVAILABLE = True
 except ImportError:
     _DNS_AVAILABLE = False
+
+
+def _fetch_record(resolver, domain, rtype):
+    """Query a single DNS record type; returns (rtype, values, error_code)."""
+    try:
+        values = _resolve_records(resolver, domain, rtype)
+        return rtype, values, None
+    except dns.resolver.NXDOMAIN:
+        return rtype, [], "NXDOMAIN"
+    except dns.resolver.NoNameservers:
+        return rtype, [], f"{rtype} query failed: authoritative nameserver unavailable"
+    except dns.exception.Timeout:
+        return rtype, [], f"{rtype} query timed out."
+    except Exception as exc:
+        return rtype, [], f"{rtype} query failed: {exc}"
 
 
 def _resolver(timeout):
@@ -89,27 +105,28 @@ def run(url, domain, timeout=10):
     resolver = _resolver(timeout)
     nameservers = []
 
+    record_data = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(RECORD_TYPES))) as executor:
+        future_to_rtype = {executor.submit(_fetch_record, resolver, domain, rtype): rtype for rtype in RECORD_TYPES}
+        for future in as_completed(future_to_rtype):
+            rtype, values, err = future.result()
+            record_data[rtype] = (values, err)
+
     for rtype in RECORD_TYPES:
-        try:
-            values = _resolve_records(resolver, domain, rtype)
-            if values:
-                info(rtype, ", ".join(values[:6]) + (f" ... (+{len(values)-6})" if len(values) > 6 else ""))
-            else:
-                print(f"{Colors.DIM}[ ] {rtype}: No records{Colors.RESET}")
-            results["records"][rtype] = values
-            if rtype == "NS":
-                nameservers = [value.rstrip(".") for value in values]
-        except dns.resolver.NXDOMAIN:
+        values, err = record_data.get(rtype, ([], None))
+        if err == "NXDOMAIN":
             error(f"Domain '{domain}' does not exist.")
             return {"error": "NXDOMAIN"}
-        except dns.resolver.NoNameservers:
-            warn(f"{rtype} query failed: authoritative nameserver unavailable")
+        elif err:
+            warn(err)
             results["records"][rtype] = []
-        except dns.exception.Timeout:
-            warn(f"{rtype} query timed out.")
-            results["records"][rtype] = []
-        except Exception as exc:
-            warn(f"{rtype} query failed: {exc}")
+        elif values:
+            info(rtype, ", ".join(values[:6]) + (f" ... (+{len(values)-6})" if len(values) > 6 else ""))
+            results["records"][rtype] = values
+            if rtype == "NS":
+                nameservers = [v.rstrip(".") for v in values]
+        else:
+            print(f"{Colors.DIM}[ ] {rtype}: No records{Colors.RESET}")
             results["records"][rtype] = []
 
     txt_records = _extract_txt_like(results["records"].get("TXT", []))

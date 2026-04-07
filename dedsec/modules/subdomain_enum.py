@@ -1,11 +1,13 @@
 import json
 import socket
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dedsec.core.colors import Colors
 from dedsec.core.utils import info, safe_request, section, warn
 
 MAX_CRT_RESULTS = 300
 MAX_DISPLAY = 50
+_MAX_SUBDOMAIN_WORKERS = 20
 
 
 def _resolve(subdomain):
@@ -69,14 +71,23 @@ def run(url, domain, timeout=10):
     resolved = []
     alive = []
 
-    for subdomain in sorted(discovered):
+    def _resolve_and_probe(subdomain):
         ip = _resolve(subdomain)
         if not ip:
-            continue
-        resolved.append({"subdomain": subdomain, "ip": ip})
+            return None
         probe = _probe_alive(subdomain, timeout)
-        if probe:
-            alive.append({"subdomain": subdomain, "ip": ip, "url": probe["url"], "status": probe["status"]})
+        return subdomain, ip, probe
+
+    with ThreadPoolExecutor(max_workers=_MAX_SUBDOMAIN_WORKERS) as executor:
+        futures = {executor.submit(_resolve_and_probe, subdomain): subdomain for subdomain in sorted(discovered)}
+        for future in as_completed(futures):
+            result_item = future.result()
+            if result_item is None:
+                continue
+            subdomain, ip, probe = result_item
+            resolved.append({"subdomain": subdomain, "ip": ip})
+            if probe:
+                alive.append({"subdomain": subdomain, "ip": ip, "url": probe["url"], "status": probe["status"]})
 
     results["resolved_count"] = len(resolved)
     results["alive_count"] = len(alive)
