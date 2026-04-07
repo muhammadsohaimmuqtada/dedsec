@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dedsec.core.colors import Colors
 from dedsec.core.utils import append_query_param, error, info, safe_request, section, warn
 
@@ -130,9 +131,15 @@ def run(url, domain, timeout=10):
         return results
 
     trigger_responses = []
-    for param, payload in TRIGGER_PAYLOADS:
+    def _fetch_trigger(param, payload):
         trigger_url = append_query_param(url, param, payload)
-        trigger_responses.append((f"trigger:{param}", safe_request(trigger_url, timeout=timeout, allow_redirects=False)))
+        return f"trigger:{param}", safe_request(trigger_url, timeout=timeout, allow_redirects=False)
+
+    with ThreadPoolExecutor(max_workers=min(5, len(TRIGGER_PAYLOADS))) as executor:
+        futures = {executor.submit(_fetch_trigger, param, payload): (param, payload) for param, payload in TRIGGER_PAYLOADS}
+        for future in as_completed(futures):
+            label, resp = future.result()
+            trigger_responses.append((label, resp))
 
     response_profiles = _request_profiles([("base", base_response), *trigger_responses])
     blocked_triggers = [profile for profile in response_profiles if profile["label"].startswith("trigger:") and profile["status"] in BLOCKING_STATUSES]

@@ -9,11 +9,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 HEADERS = {"User-Agent": "DEDSEC-Recon/1.0"}
 DEFAULT_VERIFY_TLS = True
 RETRY = urllib3.util.Retry(
-    total=1,
-    connect=1,
-    read=1,
-    status=1,
-    backoff_factor=0.1,
+    total=3,
+    connect=2,
+    read=2,
+    status=2,
+    backoff_factor=0.5,
     status_forcelist={429, 500, 502, 503, 504},
     allowed_methods={"GET", "HEAD"},
     raise_on_status=False,

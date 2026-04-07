@@ -13,8 +13,11 @@ class DnsTlsModuleTests(unittest.TestCase):
         self.assertTrue(posture["spf"]["present"])
         self.assertTrue(posture["spf"]["strict"])
 
+    @patch("dedsec.modules.dns_recon._resolver")
     @patch("dedsec.modules.dns_recon._resolve_records")
-    def test_dns_security_posture_detects_dmarc(self, mock_resolve_records):
+    def test_dns_security_posture_detects_dmarc(self, mock_resolve_records, mock_resolver):
+        from unittest.mock import MagicMock
+        mock_resolver.return_value = MagicMock()
         mock_resolve_records.return_value = ["v=DMARC1; p=reject; rua=mailto:sec@example.com"]
         posture = dns_recon._security_posture("example.com", [])
         self.assertTrue(posture["dmarc"]["present"])
