@@ -101,6 +101,7 @@ def run(url, domain, timeout=10):
     resp = safe_request(url, timeout=timeout)
     if not resp:
         error("Could not connect to target.")
+        results["error"] = "Could not connect to target"
         return results
 
     headers_lower = {key.lower(): value for key, value in resp.headers.items()}

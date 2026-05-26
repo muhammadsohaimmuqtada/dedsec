@@ -1,7 +1,7 @@
 import socket
 
 from dedsec.core.colors import Colors
-from dedsec.core.utils import info, safe_request, section, warn
+from dedsec.core.utils import cached_resolve_ips, info, safe_request, section, warn
 
 PROVIDER_PATTERNS = {
     "Amazon Web Services": ["amazon", "aws", "ec2"],
@@ -58,18 +58,6 @@ def _ip_metadata(ip, timeout):
     }
 
 
-def _resolve_ips(domain):
-    ips = set()
-    for family in (socket.AF_INET, socket.AF_INET6):
-        try:
-            infos = socket.getaddrinfo(domain, None, family, socket.SOCK_STREAM)
-            for entry in infos:
-                ips.add(entry[4][0])
-        except Exception:
-            continue
-    return sorted(ips)
-
-
 def run(url, domain, timeout=10):
     section("Hosting Intelligence", "🏢")
     results = {"ips": [], "cdn_signals": [], "provider_summary": []}
@@ -89,7 +77,7 @@ def run(url, domain, timeout=10):
         info("CDN Signal", signal)
     results["cdn_signals"] = cdn_signals
 
-    ips = _resolve_ips(domain)
+    ips = list(cached_resolve_ips(domain))
     if not ips:
         warn("Could not resolve target IPs.")
         return results

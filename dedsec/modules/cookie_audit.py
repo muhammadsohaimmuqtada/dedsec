@@ -47,6 +47,7 @@ def run(url, domain, timeout=10):
     resp = safe_request(url, timeout=timeout)
     if not resp:
         error("Could not connect to target.")
+        results["error"] = "Could not connect to target"
         return results
 
     cookies = resp.cookies

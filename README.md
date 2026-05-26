@@ -65,6 +65,11 @@ dedsec https://example.com
 dedsec https://example.com --modules waf ssl headers dns
 ```
 
+**Tune safe performance limits:**
+```bash
+dedsec https://example.com --concurrency 6 --timeout 12 --module-timeout 20 --global-timeout 90 --retries 3 --backoff 0.5
+```
+
 **JSON output:**
 ```bash
 dedsec https://example.com --json
@@ -75,9 +80,9 @@ dedsec https://example.com --json
 dedsec https://example.com --output report.json --json
 ```
 
-**Custom timeout:**
+**Backward-compatible thread flag (maps to --concurrency):**
 ```bash
-dedsec https://example.com --timeout 15
+dedsec https://example.com --threads 5
 ```
 
 **Run via Python module:**
@@ -85,21 +90,53 @@ dedsec https://example.com --timeout 15
 python -m dedsec https://example.com
 ```
 
+### Rich Terminal UI Example
+
+```text
+                                Scan Configuration
+┏━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ key            ┃ value                                                             ┃
+┡━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ Target URL     │ https://example.com                                               │
+│ Domain         │ example.com                                                       │
+│ Modules        │ waf, tech, dns, geo, ssl                                         │
+│ Timeout        │ 10s                                                               │
+│ Concurrency    │ 5                                                                 │
+└────────────────┴───────────────────────────────────────────────────────────────────┘
+
+                              Module Status Summary
+┏━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━┓
+┃ Module    ┃ Status  ┃ Duration (s) ┃
+┡━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━┩
+│ waf       │ SUCCESS │         1.20 │
+│ tech      │ SUCCESS │         0.44 │
+│ dns       │ TIMEOUT │        20.00 │
+└───────────┴─────────┴──────────────┘
+```
+
+![Rich CLI output example](docs/assets/cli-rich-ui.png)
+
 ### All Options
 
 ```
-usage: dedsec [-h] [--modules {...}] [--timeout TIMEOUT] [--output OUTPUT] [--json] [--version] url
+usage: dedsec [OPTIONS] URL
 
 positional arguments:
   url              Target URL (e.g., https://example.com)
 
-optional arguments:
-  --modules        Modules to run: all, waf, tech, dns, geo, ssl, headers,
-                   redirect, robots, cookies, ports, whois, subdomains, js
-  --timeout        Request timeout in seconds (default: 10)
-  --output         Save report to file (JSON)
-  --json           Print results as JSON
-  --version        Show version and exit
+options:
+  --modules, -m        Modules to run (repeatable). Supports `all`
+  --timeout            Base request timeout in seconds (default: 10)
+  --concurrency        Bounded parallel module concurrency (default: 5)
+  --threads            Backward-compatible alias for --concurrency
+  --module-timeout     Per-module timeout in seconds
+  --global-timeout     Global scan timeout in seconds
+  --retries            HTTP retries with exponential backoff (default: 3)
+  --backoff            Retry backoff factor (default: 0.5)
+  --output             Save report to JSON file
+  --json               Print JSON report to stdout
+  --market             Run curated high-signal module profile
+  --version            Show version and exit
 ```
 
 ---
@@ -107,9 +144,11 @@ optional arguments:
 ## Requirements
 
 - Python 3.8+
-- `requests>=2.31.0`
-- `dnspython>=2.4.0`
-- `python-whois>=0.9.4`
+- `requests==2.32.3`
+- `dnspython==2.6.1`
+- `python-whois==0.9.5`
+- `rich==13.9.4`
+- `typer==0.12.5`
 
 ---
 

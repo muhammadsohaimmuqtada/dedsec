@@ -128,6 +128,7 @@ def run(url, domain, timeout=10):
     base_response = safe_request(url, timeout=timeout)
     if not base_response:
         error("Could not connect to target.")
+        results["error"] = "Could not connect to target"
         return results
 
     trigger_responses = []

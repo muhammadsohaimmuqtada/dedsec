@@ -2,7 +2,7 @@ import json
 from datetime import datetime
 from dedsec.core.colors import Colors
 
-def generate_report(url, domain, results, json_output=False, output_file=None):
+def generate_report(url, domain, results, json_output=False, output_file=None, module_results=None):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{Colors.BOLD}{Colors.CYAN}{'='*60}{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.WHITE}  DEDSEC SCAN COMPLETE{Colors.RESET}")
@@ -18,8 +18,19 @@ def generate_report(url, domain, results, json_output=False, output_file=None):
             "url": url,
             "domain": domain,
             "timestamp": timestamp,
-            "results": results
+            "results": results,
         }
+        if module_results is not None:
+            report_data["modules"] = [
+                {
+                    "module": item.module,
+                    "label": item.label,
+                    "status": item.status,
+                    "duration": round(item.duration, 3),
+                    "error": item.error,
+                }
+                for item in module_results
+            ]
         if json_output:
             print(json.dumps(report_data, indent=2, default=str))
         if output_file:
