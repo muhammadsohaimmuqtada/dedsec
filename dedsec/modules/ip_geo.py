@@ -1,24 +1,22 @@
-import socket
-import requests
-from dedsec.core.utils import section, info, warn, error
-from dedsec.core.colors import Colors
+from dedsec.core.utils import cached_resolve_ipv4, error, info, safe_request, section, warn
 
 
 def run(url, domain, timeout=10):
     section("IP & GeoLocation", "🌍")
     results = {}
 
-    try:
-        ip = socket.gethostbyname(domain)
-        info("IP Address", ip)
-        results["ip"] = ip
-    except socket.gaierror as e:
-        error(f"Could not resolve IP: {e}")
+    ip = cached_resolve_ipv4(domain)
+    if not ip:
+        error("Could not resolve IP.")
         return results
+    info("IP Address", ip)
+    results["ip"] = ip
 
     try:
         api_url = f"http://ip-api.com/json/{ip}?fields=status,message,country,regionName,city,zip,lat,lon,timezone,isp,org,as"
-        resp = requests.get(api_url, timeout=timeout)
+        resp = safe_request(api_url, timeout=timeout)
+        if not resp:
+            raise RuntimeError("request failed")
         data = resp.json()
 
         if data.get("status") == "success":

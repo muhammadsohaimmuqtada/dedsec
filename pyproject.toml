@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dedsec"
+version = "1.1.0"
+description = "DEDSEC — Advanced Web Reconnaissance Framework"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+  "requests==2.32.3",
+  "dnspython==2.6.1",
+  "python-whois==0.9.5",
+  "rich==13.9.4",
+  "typer==0.12.5",
+]
+
+[project.scripts]
+dedsec = "dedsec.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "black==24.10.0",
+  "pytest==8.3.3",
+  "ruff==0.7.2",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py38"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501", "F401", "F841", "I001"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -5,7 +5,7 @@ with open("requirements.txt") as f:
 
 setup(
     name="dedsec",
-    version="1.0.0",
+    version="1.1.0",
     author="Sohaim",
     description="DEDSEC — Advanced Web Reconnaissance Framework",
     packages=find_packages(),
