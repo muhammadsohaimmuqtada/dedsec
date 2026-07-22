@@ -139,7 +139,7 @@ def run(url, domain, timeout=10):
     results["mx"] = mx_servers
     if mx_servers:
         info("MX Servers", ", ".join(mx_servers))
-        print(f"  Probing MX servers for open relay and banner leaks...")
+        print("  Probing MX servers for open relay and banner leaks...")
         for mx in mx_servers[:3]:
             banner, is_relay = _check_open_relay(mx)
             entry = {"mx": mx, "banner": banner, "open_relay": is_relay}

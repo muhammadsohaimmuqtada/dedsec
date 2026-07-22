@@ -24,6 +24,10 @@ def _parse_cert_date(raw):
 
 def _connect(domain, timeout, insecure=False):
     context = ssl.create_default_context()
+    if hasattr(context, "minimum_version") and hasattr(ssl, "TLSVersion"):
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+    else:
+        context.options |= ssl.OP_NO_TLSv1 | ssl.OP_NO_TLSv1_1
     if insecure:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE

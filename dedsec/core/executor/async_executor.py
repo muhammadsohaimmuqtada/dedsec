@@ -1,4 +1,8 @@
-import asyncio, sys, io, time, importlib
+import asyncio
+import importlib
+import io
+import sys
+import time
 from typing import Dict, Tuple, List, Callable, Optional
 from dedsec.core.contracts import ScanConfig, ModuleResult
 
