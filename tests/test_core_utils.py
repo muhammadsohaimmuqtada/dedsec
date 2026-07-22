@@ -28,6 +28,30 @@ class CoreUtilsTests(unittest.TestCase):
         self.assertEqual(second, "1.1.1.1")
         self.assertEqual(mock_gethostbyname.call_count, 1)
 
+    def test_shannon_entropy(self):
+        low_ent = utils.shannon_entropy("aaaaaaa")
+        high_ent = utils.shannon_entropy("AKIAIOSFODNN7EXAMPLE")
+        self.assertLess(low_ent, 1.0)
+        self.assertGreater(high_ent, 3.5)
+
+    def test_soft_404_detection(self):
+        sample = "<html><head><title>Custom Page Not Found Error</title></head><body>Page not found baseline sample.</body></html>"
+        profile = {
+            "status_code": 200,
+            "avg_length": len(sample),
+            "sample_text": sample
+        }
+        class FakeResp:
+            status_code = 200
+            text = sample
+
+        self.assertTrue(utils.is_soft_404(FakeResp(), profile))
+
+    def test_wildcard_ip(self):
+        wildcards = {"1.1.1.1", "2.2.2.2"}
+        self.assertTrue(utils.is_wildcard_ip("1.1.1.1", wildcards))
+        self.assertFalse(utils.is_wildcard_ip("3.3.3.3", wildcards))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,42 +15,40 @@ class FakeResponse:
 class DetectionLogicTests(unittest.TestCase):
     @patch("dedsec.modules.waf_detect.safe_request")
     def test_generic_blocking_does_not_claim_specific_waf(self, mock_safe_request):
-        mock_safe_request.side_effect = [
-            FakeResponse(headers={"Server": "nginx"}, text="welcome", status_code=200),
-            FakeResponse(status_code=403, text="access denied"),
-            FakeResponse(status_code=403, text="access denied"),
-            FakeResponse(status_code=403, text="access denied"),
-            FakeResponse(status_code=403, text="access denied"),
-            FakeResponse(status_code=403, text="access denied"),
+        responses = [
+            FakeResponse(headers={"Server": "nginx"}, text="welcome", status_code=200), # base
         ]
+        # 15 trigger responses
+        for _ in range(15):
+            responses.append(FakeResponse(status_code=403, text="access denied"))
+        mock_safe_request.side_effect = responses
 
         result = waf_detect.run("https://example.com", "example.com")
 
         self.assertEqual(result["detected"], [])
-        self.assertEqual(result["blocked_triggers"], 5)
+        self.assertEqual(result["blocked_triggers"], 15)
         self.assertIsNone(result["primary"])
 
     @patch("dedsec.modules.waf_detect.safe_request")
     def test_cloudflare_detection_requires_vendor_specific_evidence(self, mock_safe_request):
-        mock_safe_request.side_effect = [
+        responses = [
             FakeResponse(
                 headers={"Server": "cloudflare", "CF-Ray": "abc123"},
                 cookies={"__cf_bm": "token"},
                 text="welcome",
                 status_code=200,
             ),
-            FakeResponse(status_code=403, text="attention required by cloudflare"),
-            FakeResponse(status_code=403, text="attention required by cloudflare"),
-            FakeResponse(status_code=403, text="attention required by cloudflare"),
-            FakeResponse(status_code=403, text="attention required by cloudflare"),
-            FakeResponse(status_code=403, text="attention required by cloudflare"),
         ]
+        # 15 trigger responses
+        for _ in range(15):
+            responses.append(FakeResponse(status_code=403, text="attention required by cloudflare"))
+        mock_safe_request.side_effect = responses
 
         result = waf_detect.run("https://example.com", "example.com")
 
         self.assertEqual(result["primary"], "Cloudflare")
         self.assertIn("Cloudflare", result["detected"])
-        self.assertEqual(result["blocked_triggers"], 5)
+        self.assertEqual(result["blocked_triggers"], 15)
 
     @patch("dedsec.modules.tech_fingerprint.safe_request")
     def test_tech_fingerprint_avoids_generic_string_false_positive(self, mock_safe_request):

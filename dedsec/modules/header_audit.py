@@ -1,18 +1,74 @@
 from dedsec.core.colors import Colors
 from dedsec.core.utils import error, info, safe_request, section, warn
 
+def _analyze_csp(value):
+    """
+    Perform depth analysis on CSP header value.
+    Returns (is_valid, list of issues).
+    """
+    issues = []
+    val_lower = value.lower()
+    
+    # 1. Look for unsafe directives
+    if "unsafe-inline" in val_lower:
+        issues.append("Allows 'unsafe-inline' (XSS protection bypass)")
+    if "unsafe-eval" in val_lower:
+        issues.append("Allows 'unsafe-eval' (execution of arbitrary strings)")
+        
+    # 2. Check wildcard sources
+    directives = [d.strip() for d in val_lower.split(";") if d.strip()]
+    
+    default_src_found = False
+    script_src_found = False
+    
+    for d in directives:
+        parts = d.split()
+        if not parts:
+            continue
+        dir_name = parts[0]
+        sources = parts[1:]
+        
+        if dir_name == "default-src":
+            default_src_found = True
+            if "*" in sources:
+                issues.append("default-src allows wildcard '*'")
+            if "data:" in sources:
+                issues.append("default-src allows data: URIs (can load arbitrary payloads)")
+        elif dir_name == "script-src":
+            script_src_found = True
+            if "*" in sources:
+                issues.append("script-src allows wildcard '*'")
+            if "data:" in sources:
+                issues.append("script-src allows data: URIs")
+                
+    if not default_src_found:
+        issues.append("Missing default-src directive")
+    if not script_src_found and not default_src_found:
+        issues.append("Missing script-src fallback directive")
+        
+    if issues:
+        return False, "; ".join(issues)
+    return True, None
+
 SECURITY_HEADERS = {
     "strict-transport-security": {
         "label": "Strict-Transport-Security (HSTS)",
         "severity": "HIGH",
         "description": "Forces HTTPS and helps prevent protocol downgrade attacks.",
-        "validator": lambda value, url: ("max-age=" in value.lower(), "Missing max-age directive."),
+        "validator": lambda value, url: (
+            "max-age=" in value.lower(),
+            "Missing max-age directive."
+        ) if "max-age=" in value.lower() else (
+            False, "Missing max-age directive."
+        ) if "preload" in value.lower() else (
+            False, "Missing max-age directive. Consider adding 'preload'."
+        ),
     },
     "content-security-policy": {
         "label": "Content-Security-Policy (CSP)",
         "severity": "HIGH",
         "description": "Restricts script and resource origins to reduce XSS risk.",
-        "validator": lambda value, url: (len(value.strip()) > 0, "Empty CSP value."),
+        "validator": lambda value, url: _analyze_csp(value),
     },
     "x-frame-options": {
         "label": "X-Frame-Options",
@@ -83,7 +139,8 @@ SECURITY_HEADERS = {
     },
 }
 
-DISCLOSURE_HEADERS = ["server", "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version", "x-generator"]
+DISCLOSURE_HEADERS = ["server", "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version", "x-generator", "expect-ct"]
+INFORMATIONAL_HEADERS = ["nel", "report-to"]
 SEVERITY_COLORS = {"HIGH": Colors.RED, "MEDIUM": Colors.YELLOW, "LOW": Colors.DIM}
 
 
@@ -96,7 +153,7 @@ def _validate_header(meta, value, url):
 
 def run(url, domain, timeout=10):
     section("HTTP Header Audit", "📋")
-    results = {"present": {}, "missing": {}, "weak": {}, "disclosure": {}}
+    results = {"present": {}, "missing": {}, "weak": {}, "disclosure": {}, "informational": {}}
 
     resp = safe_request(url, timeout=timeout)
     if not resp:
@@ -127,6 +184,12 @@ def run(url, domain, timeout=10):
 
         value = headers_lower[header_key]
         is_valid, detail = _validate_header(meta, value, url)
+        
+        # HSTS check for preload
+        if header_key == "strict-transport-security" and "preload" not in value.lower():
+            detail = "HSTS header present but missing 'preload' option."
+            is_valid = False
+            
         if is_valid:
             print(f"  {Colors.GREEN}✔{Colors.RESET}  {Colors.BOLD}{meta['label']}{Colors.RESET}")
             print(f"      {Colors.DIM}Value: {value[:100]}{'...' if len(value) > 100 else ''}{Colors.RESET}")
@@ -150,6 +213,15 @@ def run(url, domain, timeout=10):
             results["disclosure"][header] = value
         else:
             print(f"  {Colors.GREEN}✔{Colors.RESET}  '{header}' not present")
+            
+    print(f"\n{Colors.BOLD}  Informational Headers:{Colors.RESET}")
+    for header in INFORMATIONAL_HEADERS:
+        if header in headers_lower:
+            value = headers_lower[header]
+            info(f"'{header}' present", value[:100])
+            results["informational"][header] = value
+        else:
+            print(f"  {Colors.DIM}[ ] '{header}' not present{Colors.RESET}")
 
     effective_score = len(present)
     penalty = len(weak)

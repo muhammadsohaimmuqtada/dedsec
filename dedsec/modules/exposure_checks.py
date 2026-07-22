@@ -1,6 +1,3 @@
-from dedsec.core.colors import Colors
-from dedsec.core.utils import info, safe_request, section, warn
-
 CHECKS = [
     {
         "id": "dotenv",
@@ -9,6 +6,30 @@ CHECKS = [
         "severity": "CRITICAL",
         "status_in": {200},
         "content_indicators": ["db_password=", "app_key=", "aws_access_key_id=", "secret_key=", "database_url="],
+    },
+    {
+        "id": "dotenv_local",
+        "label": ".env.local file exposure",
+        "path": "/.env.local",
+        "severity": "CRITICAL",
+        "status_in": {200},
+        "content_indicators": ["db_password=", "app_key=", "secret_key="],
+    },
+    {
+        "id": "dotenv_production",
+        "label": ".env.production file exposure",
+        "path": "/.env.production",
+        "severity": "CRITICAL",
+        "status_in": {200},
+        "content_indicators": ["db_password=", "app_key=", "secret_key="],
+    },
+    {
+        "id": "dotenv_development",
+        "label": ".env.development file exposure",
+        "path": "/.env.development",
+        "severity": "HIGH",
+        "status_in": {200},
+        "content_indicators": ["db_password=", "app_key=", "secret_key="],
     },
     {
         "id": "phpinfo",
@@ -51,6 +72,119 @@ CHECKS = [
         "status_in": {200},
         "json_keys": ["Version", "ApiVersion", "MinAPIVersion"],
     },
+    {
+        "id": "git_head",
+        "label": "Git HEAD exposure",
+        "path": "/.git/HEAD",
+        "severity": "CRITICAL",
+        "status_in": {200},
+        "content_indicators": ["ref: refs/"],
+    },
+    {
+        "id": "git_config",
+        "label": "Git config exposure",
+        "path": "/.git/config",
+        "severity": "CRITICAL",
+        "status_in": {200},
+        "content_indicators": ["[core]"],
+    },
+    {
+        "id": "git_index",
+        "label": "Git index exposure",
+        "path": "/.git/index",
+        "severity": "CRITICAL",
+        "status_in": {200},
+        "binary_magic": b"DIRC",
+    },
+    {
+        "id": "svn_entries",
+        "label": "SVN entries exposure",
+        "path": "/.svn/entries",
+        "severity": "HIGH",
+        "status_in": {200},
+        "content_indicators": ["svn"],
+    },
+    {
+        "id": "config_json",
+        "label": "config.json exposure",
+        "path": "/config.json",
+        "severity": "HIGH",
+        "status_in": {200},
+        "json_keys": [],
+        "json_only": True,
+    },
+    {
+        "id": "config_yml",
+        "label": "config.yml exposure",
+        "path": "/config.yml",
+        "severity": "HIGH",
+        "status_in": {200},
+        "content_indicators": [":"],
+    },
+    {
+        "id": "backup_zip",
+        "label": "backup.zip exposure",
+        "path": "/backup.zip",
+        "severity": "HIGH",
+        "status_in": {200},
+        "binary_magic": b"PK\x03\x04",
+    },
+    {
+        "id": "db_sql",
+        "label": "db.sql exposure",
+        "path": "/db.sql",
+        "severity": "CRITICAL",
+        "status_in": {200},
+        "content_indicators": ["create table", "insert into"],
+    },
+    {
+        "id": "swagger_ui",
+        "label": "Swagger UI exposure",
+        "path": "/swagger-ui.html",
+        "severity": "MEDIUM",
+        "status_in": {200},
+        "content_indicators": ["swagger-ui", "swagger"],
+    },
+    {
+        "id": "openapi_json",
+        "label": "OpenAPI JSON exposure",
+        "path": "/openapi.json",
+        "severity": "MEDIUM",
+        "status_in": {200},
+        "json_keys": ["openapi", "paths"],
+    },
+    {
+        "id": "security_txt",
+        "label": "security.txt present",
+        "path": "/.well-known/security.txt",
+        "severity": "INFO",
+        "status_in": {200},
+        "content_indicators": ["contact:"],
+    },
+    {
+        "id": "crossdomain",
+        "label": "crossdomain.xml exposure",
+        "path": "/crossdomain.xml",
+        "severity": "MEDIUM",
+        "status_in": {200},
+        "content_indicators": ["<allow-access-from"],
+    },
+    {
+        "id": "admin_panel",
+        "label": "Admin Panel presence",
+        "path": "/admin/",
+        "severity": "HIGH",
+        "status_in": {200, 301, 302},
+        "skip_body_check": True,
+    },
+    {
+        "id": "wp_login",
+        "label": "WordPress login presence",
+        "path": "/wp-login.php",
+        "severity": "MEDIUM",
+        "status_in": {200},
+        "content_indicators": ["wp-submit", "user_login"],
+    },
 ]
 
 
@@ -66,17 +200,35 @@ def _matches_json_keys(resp, keys):
         return False
     if not isinstance(data, dict):
         return False
+    if not keys:
+        return True # Just valid JSON checks
     return all(key in data for key in keys)
 
 
-def _is_confirmed(resp, check):
+from dedsec.core.colors import Colors
+from dedsec.core.utils import get_soft404_profile, info, is_soft_404, safe_request, section, warn
+
+# (CHECKS list remains same)
+def _is_confirmed(resp, check, soft404_prof=None):
+    if soft404_prof and is_soft_404(resp, soft404_prof):
+        return False, "soft 404 response match"
+
     if resp.status_code not in check["status_in"]:
         return False, "unexpected status"
 
-    if check.get("json_keys"):
-        if _matches_json_keys(resp, check["json_keys"]):
-            return True, "expected JSON keys found"
-        return False, "expected JSON keys missing"
+    if check.get("skip_body_check"):
+        return True, "status code matched"
+
+    if check.get("binary_magic"):
+        content = resp.content if hasattr(resp, "content") else b""
+        if content.startswith(check["binary_magic"]):
+            return True, f"binary magic bytes matched"
+        return False, "binary magic bytes missing"
+
+    if check.get("json_only") or check.get("json_keys"):
+        if _matches_json_keys(resp, check.get("json_keys", [])):
+            return True, "valid JSON keys/format confirmed"
+        return False, "JSON validation failed"
 
     if check.get("binary_ok"):
         content_type = resp.headers.get("Content-Type", "").lower()
@@ -85,14 +237,22 @@ def _is_confirmed(resp, check):
 
     excerpt = _body_excerpt(resp)
     indicators = check.get("content_indicators", [])
-    if all(indicator in excerpt for indicator in indicators[:1]) and any(indicator in excerpt for indicator in indicators):
-        return True, "strong body indicator match"
+    if not indicators:
+        return True, "status matched, no content verification required"
+
+    if any(indicator in excerpt for indicator in indicators):
+        return True, "content signature match"
     return False, "content signature mismatch"
 
 
 def run(url, domain, timeout=10):
     section("Common Exposure Checks", "🚨")
     results = {"confirmed": [], "candidates": [], "tested": 0}
+
+    # Obtain Soft-404 Profile for the target host
+    soft404_prof = get_soft404_profile(url, timeout=min(timeout, 5))
+    if soft404_prof:
+        info("Soft-404 Baseline Profile", f"Status {soft404_prof.get('status_code')}, Avg Len ~{soft404_prof.get('avg_length')} bytes")
 
     for check in CHECKS:
         test_url = f"{url.rstrip('/')}{check['path']}"
@@ -103,7 +263,7 @@ def run(url, domain, timeout=10):
             print(f"{Colors.DIM}[ ] {check['label']}: request failed{Colors.RESET}")
             continue
 
-        confirmed, reason = _is_confirmed(resp, check)
+        confirmed, reason = _is_confirmed(resp, check, soft404_prof)
         finding = {
             "id": check["id"],
             "label": check["label"],
@@ -116,11 +276,11 @@ def run(url, domain, timeout=10):
         if confirmed:
             warn(f"CONFIRMED {check['severity']}: {check['label']} ({test_url})")
             results["confirmed"].append(finding)
-        elif resp.status_code in {200, 401, 403}:
+        elif resp.status_code in {200, 401, 403} and reason != "soft 404 response match":
             print(f"{Colors.DIM}[~] candidate: {check['label']} ({resp.status_code}){Colors.RESET}")
             results["candidates"].append(finding)
         else:
-            print(f"{Colors.DIM}[ ] {check['label']}: {resp.status_code}{Colors.RESET}")
+            print(f"{Colors.DIM}[ ] {check['label']}: {resp.status_code} ({reason}){Colors.RESET}")
 
     if results["confirmed"]:
         info("Confirmed Exposures", str(len(results["confirmed"])))

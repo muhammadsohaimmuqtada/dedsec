@@ -1,3 +1,4 @@
+import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dedsec.core.colors import Colors
 from dedsec.core.utils import error, info, section, warn
@@ -53,14 +54,91 @@ def _extract_txt_like(values):
     return normalized
 
 
+DKIM_SELECTORS = [
+    "default", "google", "mail", "dkim", "k1", "s1", "s2",
+    "mailjet", "sendgrid", "amazonses", "selector1", "selector2",
+    "smtp", "email", "key1", "key2",
+]
+
+
+def _check_dkim(domain, timeout):
+    """Check common DKIM selectors. Returns list of found selectors."""
+    found = []
+    resolver = _resolver(timeout)
+
+    def _try_selector(sel):
+        try:
+            recs = _resolve_records(resolver, f"{sel}._domainkey.{domain}", "TXT")
+            for rec in recs:
+                if "v=dkim1" in rec.lower() or "p=" in rec.lower():
+                    return sel
+        except Exception:
+            pass
+        return None
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(_try_selector, sel): sel for sel in DKIM_SELECTORS}
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                found.append(result)
+    return found
+
+
+def _check_dnssec(domain, timeout):
+    """Check if DS records exist (DNSSEC enabled at parent)."""
+    try:
+        resolver = _resolver(timeout)
+        ds_records = _resolve_records(resolver, domain, "DS")
+        return bool(ds_records), ds_records
+    except Exception:
+        return False, []
+
+
+def _check_dangling_cnames(domain, cname_records, timeout):
+    """For each CNAME target, try to resolve it. Unresolvable = potential takeover."""
+    dangling = []
+    for cname_target in cname_records:
+        target = cname_target.rstrip(".")
+        try:
+            socket.gethostbyname(target)
+        except socket.gaierror:
+            # NXDOMAIN / unresolvable CNAME target
+            dangling.append({"cname": domain, "target": target})
+        except Exception:
+            pass
+    return dangling
+
+
 def _security_posture(domain, txt_records):
-    findings = {"spf": {"present": False, "strict": False}, "dmarc": {"present": False, "strict": False}}
+    findings = {
+        "spf": {"present": False, "strict": False, "policy": None, "severity": None},
+        "dmarc": {"present": False, "strict": False, "policy": None},
+    }
 
     spf_values = [txt for txt in txt_records if txt.lower().startswith("v=spf1")]
     findings["spf"]["present"] = bool(spf_values)
     if spf_values:
         spf = spf_values[0].lower()
-        findings["spf"]["strict"] = any(token in spf for token in (" -all", " ~all"))
+        if "+all" in spf:
+            findings["spf"]["policy"] = "+all"
+            findings["spf"]["severity"] = "CRITICAL"
+            findings["spf"]["strict"] = False
+        elif "?all" in spf:
+            findings["spf"]["policy"] = "?all"
+            findings["spf"]["severity"] = "MEDIUM"
+            findings["spf"]["strict"] = False
+        elif "~all" in spf:
+            findings["spf"]["policy"] = "~all"
+            findings["spf"]["severity"] = "LOW"
+            findings["spf"]["strict"] = True
+        elif "-all" in spf:
+            findings["spf"]["policy"] = "-all"
+            findings["spf"]["severity"] = "PASS"
+            findings["spf"]["strict"] = True
+        else:
+            findings["spf"]["policy"] = "missing-all"
+            findings["spf"]["severity"] = "HIGH"
 
     dmarc_domain = f"_dmarc.{domain}"
     try:
@@ -74,7 +152,18 @@ def _security_posture(domain, txt_records):
     findings["dmarc"]["record"] = dmarc_entry
     if dmarc_entry:
         dmarc_lower = dmarc_entry.lower()
-        findings["dmarc"]["strict"] = ("p=reject" in dmarc_lower) or ("p=quarantine" in dmarc_lower)
+        if "p=reject" in dmarc_lower:
+            findings["dmarc"]["policy"] = "reject"
+            findings["dmarc"]["strict"] = True
+        elif "p=quarantine" in dmarc_lower:
+            findings["dmarc"]["policy"] = "quarantine"
+            findings["dmarc"]["strict"] = True
+        elif "p=none" in dmarc_lower:
+            findings["dmarc"]["policy"] = "none"
+            findings["dmarc"]["strict"] = False
+        else:
+            findings["dmarc"]["policy"] = "unknown"
+            findings["dmarc"]["strict"] = False
 
     return findings
 
@@ -96,7 +185,8 @@ def _zone_transfer(domain, nameservers, timeout):
 
 def run(url, domain, timeout=10):
     section("DNS Reconnaissance", "🔍")
-    results = {"records": {}, "security": {}, "zone_transfer": {}, "risks": []}
+    results = {"records": {}, "security": {}, "zone_transfer": {}, "risks": [],
+               "dkim": {}, "dnssec": {}, "dangling_cnames": []}
 
     if not _DNS_AVAILABLE:
         error("dnspython not installed. Run: pip install dnspython")
@@ -134,23 +224,65 @@ def run(url, domain, timeout=10):
     results["security"] = security
 
     if not security["spf"]["present"]:
-        warn("SPF record missing.")
+        warn("SPF record missing — email spoofing possible.")
         results["risks"].append("No SPF record")
-    elif not security["spf"]["strict"]:
-        warn("SPF present but policy may be weak (missing ~all/-all).")
-        results["risks"].append("Weak SPF policy")
     else:
-        info("SPF", "Present")
+        policy = security["spf"].get("policy", "")
+        severity = security["spf"].get("severity", "")
+        if severity == "CRITICAL":
+            color = Colors.RED
+            warn(f"SPF policy '+all' — CRITICAL: anyone can send email as this domain!")
+            results["risks"].append("SPF +all: email spoofing fully open")
+        elif severity == "MEDIUM":
+            warn(f"SPF policy '?all' — neutral, offers no real protection.")
+            results["risks"].append("Weak SPF policy: ?all")
+        elif severity == "LOW":
+            warn(f"SPF policy '~all' (softfail) — mail may not be rejected.")
+            results["risks"].append("Weak SPF policy: ~all (softfail)")
+        elif severity == "PASS":
+            info("SPF", f"{Colors.GREEN}Present (-all, strict){Colors.RESET}")
+        else:
+            warn(f"SPF present but 'all' mechanism missing.")
 
     if not security["dmarc"]["present"]:
-        warn("DMARC record missing.")
+        warn("DMARC record missing — email spoofing protection absent.")
         results["risks"].append("No DMARC record")
     elif not security["dmarc"]["strict"]:
-        warn("DMARC present but policy is not quarantine/reject.")
-        results["risks"].append("Weak DMARC policy")
+        policy = security["dmarc"].get("policy", "none")
+        warn(f"DMARC present but policy is '{policy}' — not enforcing rejection.")
+        results["risks"].append(f"Weak DMARC policy: p={policy}")
     else:
-        info("DMARC", "Present with enforcement policy")
+        policy = security["dmarc"].get("policy", "")
+        info("DMARC", f"{Colors.GREEN}Present (p={policy}){Colors.RESET}")
 
+    # --- DKIM ---
+    print(f"\n{Colors.BOLD}  DKIM Check:{Colors.RESET}")
+    dkim_found = _check_dkim(domain, timeout)
+    results["dkim"] = {"found_selectors": dkim_found}
+    if dkim_found:
+        info("DKIM", f"{Colors.GREEN}Found on selectors: {', '.join(dkim_found)}{Colors.RESET}")
+    else:
+        warn("No DKIM record found on common selectors — email integrity not guaranteed.")
+        results["risks"].append("No DKIM record found")
+
+    # --- DNSSEC ---
+    dnssec_enabled, ds_records = _check_dnssec(domain, timeout)
+    results["dnssec"] = {"enabled": dnssec_enabled, "ds_records": ds_records}
+    if dnssec_enabled:
+        info("DNSSEC", f"{Colors.GREEN}Enabled (DS records present){Colors.RESET}")
+    else:
+        print(f"  {Colors.DIM}[ ] DNSSEC: Not enabled (informational){Colors.RESET}")
+
+    # --- Dangling CNAME detection ---
+    cname_records = results["records"].get("CNAME", [])
+    if cname_records:
+        dangling = _check_dangling_cnames(domain, cname_records, timeout)
+        results["dangling_cnames"] = dangling
+        for d in dangling:
+            warn(f"Potential subdomain takeover — CNAME '{d['cname']}' points to unresolvable host: {d['target']}")
+            results["risks"].append(f"Dangling CNAME -> {d['target']}")
+
+    # --- Zone transfer ---
     if nameservers:
         print(f"\n{Colors.YELLOW}[!]{Colors.RESET} Attempting DNS zone transfer on up to {min(len(nameservers), 5)} nameserver(s)...")
         zone_results = _zone_transfer(domain, nameservers, timeout)

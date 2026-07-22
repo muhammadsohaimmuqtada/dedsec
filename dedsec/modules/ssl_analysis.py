@@ -29,11 +29,31 @@ def _connect(domain, timeout, insecure=False):
         context.verify_mode = ssl.CERT_NONE
     sock = socket.create_connection((domain, 443), timeout=timeout)
     conn = context.wrap_socket(sock, server_hostname=domain)
-    cert = conn.getpeercert()
+    # Get raw binary DER cert if we need details like signature algorithm / extensions
+    der_cert = conn.getpeercert(binary_form=True)
+    parsed_cert = conn.getpeercert()
     tls_version = conn.version()
     cipher = conn.cipher()
+    
+    # Try to grab the signature algorithm via cryptography parser if available
+    sig_algo = "Unknown"
+    has_sct = False
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.backends import default_backend
+        x509_cert = x509.load_der_x509_certificate(der_cert, default_backend())
+        sig_algo = x509_cert.signature_algorithm_name
+        # Extension OID for SCT (Signed Certificate Timestamps) is 1.3.6.1.4.1.11129.2.4.2
+        try:
+            x509_cert.extensions.get_extension_for_oid(x509.ObjectIdentifier("1.3.6.1.4.1.11129.2.4.2"))
+            has_sct = True
+        except Exception:
+            pass
+    except Exception:
+        pass
+        
     conn.close()
-    return cert, tls_version, cipher
+    return parsed_cert, tls_version, cipher, sig_algo, has_sct
 
 
 def _probe_protocol(domain, timeout, version_attr):
@@ -59,14 +79,16 @@ def run(url, domain, timeout=10):
     section("SSL/TLS Analysis", "🔒")
     results = {"risks": [], "protocol_support": {}}
 
+    sig_algo = "Unknown"
+    has_sct = False
     try:
-        cert, protocol, cipher = _connect(domain, timeout, insecure=False)
+        cert, protocol, cipher, sig_algo, has_sct = _connect(domain, timeout, insecure=False)
         hostname_valid = True
     except ssl.SSLCertVerificationError as exc:
         warn(f"Certificate verification failed: {exc}")
         results["risks"].append("Certificate verification failure")
         try:
-            cert, protocol, cipher = _connect(domain, timeout, insecure=True)
+            cert, protocol, cipher, sig_algo, has_sct = _connect(domain, timeout, insecure=True)
             hostname_valid = False
         except Exception as inner_exc:
             error(f"Could not establish TLS connection: {inner_exc}")
@@ -93,9 +115,37 @@ def run(url, domain, timeout=10):
         info("Cipher", f"{cipher[0]} ({cipher[1]}, {cipher[2]} bits)")
     info("Common Name", cn)
     info("Issuer", issuer.get("commonName", "N/A"))
+    info("Signature Algorithm", sig_algo)
     info("Valid From", valid_from_raw or "N/A")
     info("Valid Until", valid_until_raw or "N/A")
     info("Hostname Validation", "PASS" if hostname_valid else "FAILED")
+
+    # 1. Self-signed certificate check
+    is_self_signed = False
+    if subject.get("commonName") == issuer.get("commonName") and subject.get("commonName") is not None:
+        is_self_signed = True
+        error("Self-signed certificate detected!")
+        results["risks"].append("Self-signed certificate")
+    else:
+        results["is_self_signed"] = False
+
+    # 2. SHA-1 signature algorithm check
+    if any(m in sig_algo.lower() for m in ("sha1", "md5")):
+        warn(f"Deprecated signature algorithm in use: {sig_algo}")
+        results["risks"].append(f"Deprecated signature algorithm: {sig_algo}")
+
+    # 3. SCT presence check
+    results["has_sct"] = has_sct
+    if has_sct:
+        info("Certificate Transparency", f"{Colors.GREEN}SCT extension present{Colors.RESET}")
+    else:
+        print(f"  {Colors.DIM}[ ] SCT extension not found (Certificate Transparency){Colors.RESET}")
+
+    # 4. Wildcard check
+    is_wildcard = cn.startswith("*.")
+    results["is_wildcard"] = is_wildcard
+    if is_wildcard:
+        print(f"  {Colors.DIM}[ ] Wildcard certificate detected (*. CN){Colors.RESET}")
 
     now = datetime.now(timezone.utc)
     days_left = None
@@ -150,6 +200,8 @@ def run(url, domain, timeout=10):
             "hostname_valid": hostname_valid,
             "san_count": len(sans),
             "sans": sans[:15],
+            "sig_algo": sig_algo,
+            "self_signed": is_self_signed,
         }
     )
     return results

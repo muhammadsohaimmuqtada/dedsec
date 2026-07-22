@@ -29,6 +29,15 @@ MODULE_MAP = {
     "js": ("dedsec.modules.js_extraction", "📜 JS & Endpoint Extraction"),
     "hosting": ("dedsec.modules.hosting_intel", "🏢 Hosting Intelligence"),
     "exposures": ("dedsec.modules.exposure_checks", "🚨 Common Exposure Checks"),
+    "cors": ("dedsec.modules.cors_check", "🌐 CORS Misconfiguration Check"),
+    "csp": ("dedsec.modules.csp_analyzer", "🛡️  CSP Deep Analyzer"),
+    "ratelimit": ("dedsec.modules.rate_limit_check", "📡 Rate Limit Detection Check"),
+    "clickjacking": ("dedsec.modules.clickjacking_check", "🖼️  Clickjacking Check"),
+    "email": ("dedsec.modules.email_security", "✉️  Email Security Audit"),
+    "vhost": ("dedsec.modules.vhost_finder", "🖥️  Virtual Host Finder"),
+    "api_schema": ("dedsec.modules.api_schema_scanner", "📜 API & OpenAPI Schema Scanner"),
+    "http_methods": ("dedsec.modules.http_methods_audit", "🛠️  Dangerous HTTP Methods Audit"),
+    "security_policy": ("dedsec.modules.security_policy_audit", "📄 Security Policy Audit"),
 }
 
 MARKET_PROFILE_MODULES = [
@@ -45,6 +54,15 @@ MARKET_PROFILE_MODULES = [
     "subdomains",
     "js",
     "exposures",
+    "cors",
+    "csp",
+    "ratelimit",
+    "clickjacking",
+    "email",
+    "vhost",
+    "api_schema",
+    "http_methods",
+    "security_policy",
 ]
 
 def _validate_modules(modules: List[str]):
@@ -104,7 +122,8 @@ def scan(
         error(str(exc))
         raise typer.Exit(code=1)
 
-    module_tokens = [token.strip() for token in modules.replace(",", " ").split() if token.strip()]
+    modules_str = modules or "all"
+    module_tokens = [token.strip() for token in modules_str.replace(",", " ").split() if token.strip()]
     module_tokens.extend(token.strip() for token in (legacy_modules or []) if token and token.strip())
     module_args = _validate_modules(module_tokens or ["all"])
     if market:

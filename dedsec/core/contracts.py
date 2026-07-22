@@ -1,13 +1,13 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
 class ScanConfig:
     timeout: int = 10
+    concurrency: int = 5
     module_timeout: Optional[int] = None
     global_timeout: Optional[int] = None
-    concurrency: int = 5
     retries: int = 3
     backoff: float = 0.5
     pool_connections: int = 20
@@ -15,11 +15,35 @@ class ScanConfig:
 
 
 @dataclass
+class TargetInfo:
+    url: str
+    domain: str
+    ip: Optional[str] = None
+    ip_list: List[str] = field(default_factory=list)
+
+
+@dataclass
+class PerModuleConfig:
+    enabled: bool = True
+    timeout: Optional[int] = None
+    options: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ModuleResult:
     module: str
     label: str
     status: str
-    duration: float = 0.0
-    result: Dict[str, Any] = field(default_factory=dict)
+    duration: float
     output: str = ""
     error: Optional[str] = None
+    data: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ModuleSummary:
+    total: int
+    successful: int
+    failed: int
+    timed_out: int
+    duration: float

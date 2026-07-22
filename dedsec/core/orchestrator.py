@@ -1,127 +1,129 @@
 import importlib
 import io
-import threading
+import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from typing import Callable, Dict, Iterable, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from dedsec.core.contracts import ModuleResult, ScanConfig
 
-_thread_buffers = threading.local()
 
+class PerThreadCapture(io.TextIOBase):
+    def __init__(self, real_stdout):
+        self._real = real_stdout
 
-class PerThreadCapture:
-    def __init__(self, real_stream):
-        self._real = real_stream
-
-    def _target(self):
-        return getattr(_thread_buffers, "buf", None) or self._real
-
-    def write(self, data):
-        self._target().write(data)
+    def write(self, s):
+        return self._real.write(s)
 
     def flush(self):
-        self._target().flush()
-
-    def fileno(self):
-        return self._real.fileno()
-
-    def isatty(self):
-        return self._real.isatty()
-
-
-def _execute_module(module_path: str, url: str, domain: str, config: ScanConfig) -> Tuple[Dict, str]:
-    buf = io.StringIO()
-    _thread_buffers.buf = buf
-    try:
-        module = importlib.import_module(module_path)
-        result = module.run(url, domain, timeout=config.timeout)
-    except Exception as exc:
-        return {"error": str(exc)}, buf.getvalue()
-    finally:
-        _thread_buffers.buf = None
-    return result, buf.getvalue()
+        return self._real.flush()
 
 
 def run_modules(
-    selected_modules: Iterable[str],
+    selected_modules: List[str],
     module_map: Dict[str, Tuple[str, str]],
     url: str,
     domain: str,
     config: ScanConfig,
-    on_update: Callable[[ModuleResult], None] = None,
-):
-    selected = list(selected_modules)
-    if not selected:
-        return {}, []
+    on_update: Optional[Callable[[ModuleResult], None]] = None,
+) -> Tuple[Dict[str, Any], List[ModuleResult]]:
+    results = {}
+    module_results = []
 
-    effective_concurrency = max(1, min(config.concurrency, len(selected)))
-    started_at = time.monotonic()
+    def _worker(module_key: str) -> ModuleResult:
+        module_path, label = module_map[module_key]
+        if on_update:
+            on_update(ModuleResult(module=module_key, label=label, status="running", duration=0.0))
 
-    results: Dict[str, Dict] = {}
-    module_results: List[ModuleResult] = []
+        buf = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = buf
 
-    with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
-        futures = {
-            key: executor.submit(_execute_module, module_map[key][0], url, domain, config)
-            for key in selected
-        }
+        start_time = time.time()
+        status = "failed"
+        err_msg = None
+        data = {}
 
-        for key in selected:
-            _, label = module_map[key]
-            event_running = ModuleResult(module=key, label=label, status="running")
-            if on_update:
-                on_update(event_running)
+        try:
+            mod = importlib.import_module(module_path)
+            timeout = config.module_timeout or config.timeout
+            data = mod.run(url=url, domain=domain, timeout=timeout)
+            status = "success"
+            if isinstance(data, dict) and "error" in data:
+                status = "failed"
+                err_msg = str(data["error"])
+        except Exception as exc:
+            err_msg = str(exc)
+            status = "failed"
+        finally:
+            sys.stdout = old_stdout
+            duration = time.time() - start_time
+            output = buf.getvalue()
 
-            finished_status = "success"
-            result_data: Dict = {}
-            output = ""
-            error = None
-            module_started = time.monotonic()
+        res = ModuleResult(
+            module=module_key,
+            label=label,
+            status=status,
+            duration=duration,
+            output=output,
+            error=err_msg,
+            data=data if isinstance(data, dict) else {},
+        )
 
-            remaining_global = None
-            if config.global_timeout is not None:
-                elapsed = time.monotonic() - started_at
-                remaining_global = max(config.global_timeout - elapsed, 0)
+        if on_update:
+            on_update(res)
 
-            timeout_budget = config.module_timeout
-            if timeout_budget is None:
-                timeout_budget = remaining_global
-            elif remaining_global is not None:
-                timeout_budget = min(timeout_budget, remaining_global)
+        return res
+
+    max_workers = min(config.concurrency, len(selected_modules))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {executor.submit(_worker, module_key): module_key for module_key in selected_modules}
+
+        start_global = time.time()
+        for future in as_completed(future_map):
+            module_key = future_map[future]
+            module_path, label = module_map[module_key]
+
+            if config.global_timeout:
+                elapsed = time.time() - start_global
+                if elapsed >= config.global_timeout:
+                    res = ModuleResult(
+                        module=module_key,
+                        label=label,
+                        status="timeout",
+                        duration=elapsed,
+                        output="",
+                        error="Global scan timeout exceeded",
+                    )
+                    module_results.append(res)
+                    results[module_key] = {"error": "Global scan timeout exceeded"}
+                    continue
 
             try:
-                if timeout_budget is not None and timeout_budget <= 0:
-                    raise TimeoutError()
-                result_data, output = futures[key].result(timeout=timeout_budget)
-                if isinstance(result_data, dict) and result_data.get("error"):
-                    finished_status = "failed"
-                    error = str(result_data["error"])
-                elif isinstance(result_data, dict) and not result_data and "could not connect" in output.lower():
-                    finished_status = "failed"
-                    error = "Could not connect to target"
+                item = future.result()
+                module_results.append(item)
+                results[item.module] = item.data
             except TimeoutError:
-                finished_status = "timeout"
-                error = "Module execution timed out"
-                result_data = {"error": error}
-                futures[key].cancel()
+                res = ModuleResult(
+                    module=module_key,
+                    label=label,
+                    status="timeout",
+                    duration=config.module_timeout or config.timeout,
+                    output="",
+                    error="Module timeout exceeded",
+                )
+                module_results.append(res)
+                results[module_key] = {"error": "Module timeout exceeded"}
             except Exception as exc:
-                finished_status = "failed"
-                error = str(exc)
-                result_data = {"error": error}
-
-            event_done = ModuleResult(
-                module=key,
-                label=label,
-                status=finished_status,
-                duration=time.monotonic() - module_started,
-                result=result_data,
-                output=output,
-                error=error,
-            )
-            results[key] = result_data
-            module_results.append(event_done)
-            if on_update:
-                on_update(event_done)
+                res = ModuleResult(
+                    module=module_key,
+                    label=label,
+                    status="failed",
+                    duration=0.0,
+                    output="",
+                    error=str(exc),
+                )
+                module_results.append(res)
+                results[module_key] = {"error": str(exc)}
 
     return results, module_results
