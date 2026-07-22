@@ -231,18 +231,18 @@ def run(url, domain, timeout=10):
         severity = security["spf"].get("severity", "")
         if severity == "CRITICAL":
             color = Colors.RED
-            warn(f"SPF policy '+all' — CRITICAL: anyone can send email as this domain!")
+            warn("SPF policy '+all' — CRITICAL: anyone can send email as this domain!")
             results["risks"].append("SPF +all: email spoofing fully open")
         elif severity == "MEDIUM":
-            warn(f"SPF policy '?all' — neutral, offers no real protection.")
+            warn("SPF policy '?all' — neutral, offers no real protection.")
             results["risks"].append("Weak SPF policy: ?all")
         elif severity == "LOW":
-            warn(f"SPF policy '~all' (softfail) — mail may not be rejected.")
+            warn("SPF policy '~all' (softfail) — mail may not be rejected.")
             results["risks"].append("Weak SPF policy: ~all (softfail)")
         elif severity == "PASS":
             info("SPF", f"{Colors.GREEN}Present (-all, strict){Colors.RESET}")
         else:
-            warn(f"SPF present but 'all' mechanism missing.")
+            warn("SPF present but 'all' mechanism missing.")
 
     if not security["dmarc"]["present"]:
         warn("DMARC record missing — email spoofing protection absent.")

@@ -1,3 +1,6 @@
+from dedsec.core.colors import Colors
+from dedsec.core.utils import get_soft404_profile, info, is_soft_404, safe_request, section, warn
+
 CHECKS = [
     {
         "id": "dotenv",
@@ -205,10 +208,6 @@ def _matches_json_keys(resp, keys):
     return all(key in data for key in keys)
 
 
-from dedsec.core.colors import Colors
-from dedsec.core.utils import get_soft404_profile, info, is_soft_404, safe_request, section, warn
-
-# (CHECKS list remains same)
 def _is_confirmed(resp, check, soft404_prof=None):
     if soft404_prof and is_soft_404(resp, soft404_prof):
         return False, "soft 404 response match"
@@ -222,7 +221,7 @@ def _is_confirmed(resp, check, soft404_prof=None):
     if check.get("binary_magic"):
         content = resp.content if hasattr(resp, "content") else b""
         if content.startswith(check["binary_magic"]):
-            return True, f"binary magic bytes matched"
+            return True, "binary magic bytes matched"
         return False, "binary magic bytes missing"
 
     if check.get("json_only") or check.get("json_keys"):

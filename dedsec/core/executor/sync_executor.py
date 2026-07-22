@@ -1,6 +1,9 @@
-import sys, io, time, importlib
+import importlib
+import io
+import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Tuple, List, Callable, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from dedsec.core.contracts import ScanConfig, ModuleResult
 
 def run_modules_sync(

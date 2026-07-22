@@ -19,5 +19,5 @@ class PluginManager:
             pass
         return False
 
-    def get_registered_plugins((self) -> Dict[str, tuple]:
+    def get_registered_plugins(self) -> Dict[str, tuple]:
         return self.plugins
