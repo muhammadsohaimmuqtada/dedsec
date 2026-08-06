@@ -44,6 +44,16 @@ class BrowserCrawler:
         if self.config.navigation_timeout_ms < 1000:
             raise ValueError("Browser navigation_timeout_ms must be at least 1000")
 
+    def _request_policy(self, url: str, method: str) -> Optional[str]:
+        """Return a blocking reason before browser traffic is allowed on wire."""
+        candidate = canonical_url(url)
+        if not self.context.scope.check_url(candidate).allowed:
+            return "scope"
+        normalized_method = str(method or "GET").upper()
+        if normalized_method not in self.SAFE_METHODS and not self.config.allow_state_changing_requests:
+            return "state-changing-not-executed"
+        return None
+
     def _record_browser_request(self, request, candidate: str, blocked_reason: Optional[str] = None) -> None:
         method = str(request.method or "GET").upper()
         tags = ["browser-observed", "not-replayed"]
@@ -122,19 +132,18 @@ class BrowserCrawler:
                         nonlocal scope_blocked, state_changing_blocked
                         request = route.request
                         candidate = canonical_url(request.url)
-                        decision = self.context.scope.check_url(candidate)
-                        if not decision.allowed:
+                        blocked_reason = self._request_policy(candidate, request.method)
+                        if blocked_reason == "scope":
                             scope_blocked += 1
                             route.abort()
                             return
-                        method = str(request.method or "GET").upper()
                         browser_requests.add(candidate)
-                        if method not in self.SAFE_METHODS and not self.config.allow_state_changing_requests:
+                        if blocked_reason:
                             state_changing_blocked += 1
                             self._record_browser_request(
                                 request,
                                 candidate,
-                                blocked_reason="state-changing-not-executed",
+                                blocked_reason=blocked_reason,
                             )
                             route.abort()
                             return
@@ -165,7 +174,7 @@ class BrowserCrawler:
                             links = []
                         for raw in links[: self.config.max_links_per_page]:
                             candidate = canonical_url(urljoin(current, str(raw)))
-                            if not self.context.scope.check_url(candidate).allowed:
+                            if self._request_policy(candidate, "GET"):
                                 continue
                             candidate_id = self.workspace.add_asset("url", candidate, source="browser")
                             self.workspace.add_edge(
