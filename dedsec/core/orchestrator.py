@@ -10,7 +10,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from dedsec.core.contracts import ModuleResult, ScanConfig
 from dedsec.core.evidence import EvidenceStore
+from dedsec.core.module_contract import RUNTIME_ENTRYPOINT
 from dedsec.core.reliability import CircuitBreaker, RetryPolicy, classify_failure
+from dedsec.core.runtime import ScanContext
 
 
 def _utc_now() -> str:
@@ -61,9 +63,13 @@ def run_modules(
     config: ScanConfig,
     on_update: Optional[Callable[[ModuleResult], None]] = None,
     evidence_store: Optional[EvidenceStore] = None,
+    scan_context: Optional[ScanContext] = None,
 ) -> Tuple[Dict[str, Any], List[ModuleResult]]:
     if not selected_modules:
         return {}, []
+
+    if evidence_store is None and scan_context is not None:
+        evidence_store = scan_context.evidence
 
     results: Dict[str, Any] = {}
     module_results: List[ModuleResult] = []
@@ -89,6 +95,12 @@ def run_modules(
 
         return _empty_capture()
 
+    def _execute_module(mod, timeout):
+        runtime_entrypoint = getattr(mod, RUNTIME_ENTRYPOINT, None)
+        if scan_context is not None and callable(runtime_entrypoint):
+            return runtime_entrypoint(scan_context)
+        return mod.run(url=url, domain=domain, timeout=timeout)
+
     def _worker(module_key: str) -> ModuleResult:
         module_path, label = module_map[module_key]
         if on_update:
@@ -113,7 +125,7 @@ def run_modules(
                 try:
                     mod = importlib.import_module(module_path)
                     timeout = config.module_timeout or config.timeout
-                    raw_data = mod.run(url=url, domain=domain, timeout=timeout)
+                    raw_data = _execute_module(mod, timeout)
                     data = raw_data if isinstance(raw_data, dict) else {}
                     if isinstance(raw_data, dict) and raw_data.get("error"):
                         err_msg = str(raw_data["error"])
