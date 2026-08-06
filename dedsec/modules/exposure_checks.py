@@ -292,16 +292,10 @@ def run(url, domain, timeout=10):
             finding["classification"] = "verified-sensitive-exposure"
             warn(f"CONFIRMED {check['severity']}: {check['label']} ({test_url})")
             results["confirmed"].append(finding)
-        elif resp.status_code in {401, 403} and reason not in {
-            "soft 404 response match",
-            "content signature mismatch",
-            "binary magic bytes missing",
-            "JSON validation failed",
-        }:
-            finding["classification"] = "candidate"
-            print(f"{Colors.DIM}[~] candidate: {check['label']} ({resp.status_code}){Colors.RESET}")
-            results["candidates"].append(finding)
         else:
+            # A bare 200/401/403/redirect without the defining content, JSON,
+            # or binary signature is not positive evidence of an exposure. In
+            # particular, 401/403 can come from generic edge/WAF rules.
             finding["classification"] = "rejected"
             results["rejected"].append(finding)
             print(f"{Colors.DIM}[ ] {check['label']}: {resp.status_code} ({reason}){Colors.RESET}")
@@ -309,9 +303,6 @@ def run(url, domain, timeout=10):
     info("Confirmed Sensitive Exposures", str(len(results["confirmed"])))
     if results["observed"]:
         info("Surface Observations", str(len(results["observed"])))
-    if results["candidates"]:
-        warn(f"{len(results['candidates'])} positive candidate endpoint(s) need manual validation.")
     if results["transport_failures"]:
         warn(f"{results['transport_failures']} probe(s) had transport failures; those paths are inconclusive.")
-
     return results
