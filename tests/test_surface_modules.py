@@ -116,12 +116,18 @@ class SurfaceModuleTests(unittest.TestCase):
     def test_csp_analyzer_records_unsafe_directives_as_posture(self, mock_safe_request):
         mock_safe_request.return_value = FakeResponse(
             status_code=200,
-            headers={"Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline' *"},
+            headers={
+                "Content-Security-Policy": (
+                    "default-src 'self'; script-src 'self' 'unsafe-inline' *"
+                )
+            },
         )
         result = csp_analyzer.run("https://example.com", "example.com")
         self.assertTrue(result["present"])
         self.assertIn("MEDIUM", [item["severity"] for item in result["findings"]])
-        self.assertTrue(all(item["classification"] == "hardening-observation" for item in result["findings"]))
+        self.assertTrue(
+            all(item["classification"] == "hardening-observation" for item in result["findings"])
+        )
 
     @patch("dedsec.modules.rate_limit_check.safe_request")
     def test_rate_limit_absence_of_429_is_not_vulnerability(self, mock_request):
@@ -177,7 +183,10 @@ class SurfaceModuleTests(unittest.TestCase):
             if method == "OPTIONS":
                 return FakeResponse(status_code=200, headers={"Allow": "GET,HEAD,OPTIONS"})
             if method == "TRACE":
-                return FakeResponse(status_code=200, text="TRACE / HTTP/1.1\nX-DEDSEC-Trace-Probe: 1")
+                return FakeResponse(
+                    status_code=200,
+                    text="TRACE / HTTP/1.1\nX-DEDSEC-Trace-Probe: 1",
+                )
             return FakeResponse(status_code=405)
 
         mock_safe_request.side_effect = side_effect
@@ -197,6 +206,10 @@ class SurfaceModuleTests(unittest.TestCase):
         self.assertEqual(port_scan._classify_connect_code(errno.ECONNREFUSED), "closed")
         self.assertEqual(port_scan._classify_connect_code(errno.ETIMEDOUT), "filtered")
         self.assertEqual(port_scan._classify_connect_code(errno.EHOSTUNREACH), "unreachable")
+        for name in ("EAGAIN", "EWOULDBLOCK", "EINPROGRESS", "EALREADY"):
+            code = getattr(errno, name, None)
+            if code is not None:
+                self.assertEqual(port_scan._classify_connect_code(code), "filtered")
 
     @patch("dedsec.modules.security_policy_audit.safe_request")
     def test_security_policy_audit_security_txt(self, mock_safe_request):
