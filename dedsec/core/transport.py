@@ -65,6 +65,7 @@ class TransportEngine:
         self._session.mount("https://", adapter)
         self._cache: Dict[str, requests.Response] = {}
         self._lock = threading.RLock()
+        self._health_endpoint = self._endpoint_key(context.target_url)
 
     @staticmethod
     def _stable(value: Any) -> str:
@@ -76,6 +77,15 @@ class TransportEngine:
             return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
         except Exception:
             return repr(value)
+
+    @staticmethod
+    def _endpoint_key(url: str):
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = (parsed.hostname or "").lower()
+        default_port = 443 if scheme == "https" else 80 if scheme == "http" else None
+        port = parsed.port or default_port
+        return scheme, host, port
 
     @classmethod
     def _cache_key(
@@ -203,12 +213,18 @@ class TransportEngine:
             max_attempts,
         )
 
-    def _is_root_host(self, url: str) -> bool:
-        return (urlparse(url).hostname or "").lower() == self.context.domain.lower()
+    def _is_health_endpoint(self, url: str) -> bool:
+        """Only the canonical target scheme/host/port may mutate shared health.
+
+        A failure on http://target:80 must not poison health for an explicitly
+        supplied https://target:443 target, and alternate service probes must
+        not open the root application's circuit.
+        """
+        return self._endpoint_key(url) == self._health_endpoint
 
     def _health_short_circuit(self, url: str) -> Optional[RequestOutcome]:
         health = getattr(self.context, "target_health", None)
-        if health is None or not self._is_root_host(url):
+        if health is None or not self._is_health_endpoint(url):
             return None
         if health.should_short_circuit():
             snapshot = health.snapshot()
@@ -216,7 +232,7 @@ class TransportEngine:
                 None,
                 RequestFailure(
                     "target_unreachable",
-                    "root target reachability circuit is open after %s consecutive failure(s)"
+                    "target endpoint reachability circuit is open after %s consecutive failure(s)"
                     % snapshot.get("consecutive_failures", 0),
                 ),
                 0.0,
@@ -226,7 +242,7 @@ class TransportEngine:
 
     def _record_root_health(self, url: str, outcome: RequestOutcome) -> None:
         health = getattr(self.context, "target_health", None)
-        if health is None or not self._is_root_host(url):
+        if health is None or not self._is_health_endpoint(url):
             return
         if outcome.response is not None:
             health.record_success()
