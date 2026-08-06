@@ -1,4 +1,5 @@
 import hashlib
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -24,11 +25,23 @@ class AuditEngine:
     """
 
     SAFE_METHODS = {"GET", "HEAD"}
+    _MUTATION_PATH = re.compile(
+        r"(?:^|/)(?:logout|log-out|signout|sign-out|delete|remove|destroy|unsubscribe|confirm|activate|deactivate|reset|reset-password)(?:/|$)",
+        re.I,
+    )
+    _SENSITIVE_INPUT = re.compile(
+        r"(?:^|[_.-])(?:password|passwd|token|csrf|xsrf|session|sid|api[_-]?key|secret|authorization|otp|code)(?:$|[_.-])",
+        re.I,
+    )
 
     def __init__(self, context, workspace: ResearchWorkspace, config: Optional[AuditConfig] = None):
         self.context = context
         self.workspace = workspace
         self.config = config or AuditConfig()
+        if self.config.max_requests < 1:
+            raise ValueError("Audit max_requests must be positive")
+        if self.config.max_insertion_points < 1:
+            raise ValueError("Audit max_insertion_points must be positive")
         self.transport = context.get_transport()
 
     @staticmethod
@@ -55,10 +68,18 @@ class AuditEngine:
         )
 
     def _eligible(self, request: RequestRecord, point: InsertionPoint) -> Optional[str]:
+        if not self.context.scope.check_url(request.url).allowed:
+            return "scope"
         if request.method not in self.SAFE_METHODS:
             return "non-idempotent-method"
+        if "state-changing-method" in request.tags:
+            return "state-changing-tag"
+        if self._MUTATION_PATH.search(urlsplit(request.url).path or "/"):
+            return "mutation-like-path"
         if point.location != "query":
             return "unsupported-active-location"
+        if self._SENSITIVE_INPUT.search(point.name or ""):
+            return "sensitive-input"
         if self.config.identity_id and request.identity_id != self.config.identity_id:
             return "identity-filter"
         return None
@@ -72,6 +93,8 @@ class AuditEngine:
         mutated = self._replace_query_value(request.url, point.name, marker)
         if not mutated:
             return {"status": "skipped", "reason": "query-parameter-not-found"}
+        if not self.context.scope.check_url(mutated).allowed:
+            return {"status": "skipped", "reason": "scope"}
 
         baseline = self.transport.request(
             request.method,
@@ -140,7 +163,7 @@ class AuditEngine:
         details: List[Dict[str, Any]] = []
 
         for request in corpus:
-            if request_count >= max(1, int(self.config.max_requests)):
+            if request_count >= self.config.max_requests:
                 break
             if not request.insertion_points:
                 continue
@@ -148,7 +171,7 @@ class AuditEngine:
             audited_for_request = 0
             skipped_for_request = 0
             for point in request.insertion_points:
-                if point_count >= max(1, int(self.config.max_insertion_points)):
+                if point_count >= self.config.max_insertion_points:
                     break
                 point_count += 1
                 reason = self._eligible(request, point)
@@ -159,6 +182,17 @@ class AuditEngine:
                     )
                     skipped_for_request += 1
                     outcomes["skipped"] = outcomes.get("skipped", 0) + 1
+                    details.append(
+                        {
+                            "request_id": request.id,
+                            "insertion_point_id": point.id,
+                            "location": point.location,
+                            "name": point.name,
+                            "status": "skipped",
+                            "reason": reason,
+                            "observation_id": None,
+                        }
+                    )
                     continue
 
                 if not self.config.reflection_probe:
