@@ -66,7 +66,6 @@ class PluginManager:
                 raise TypeError("Plugin METADATA must be a ModuleMetadata instance")
             if declared.key != key:
                 raise ValueError("Plugin metadata key does not match registered key")
-            declared.validate()
             self._plugins[key] = PluginRegistration(
                 metadata=declared,
                 import_path=import_path,
@@ -113,7 +112,6 @@ class PluginManager:
                 declared = getattr(module, "METADATA", None)
                 if not isinstance(declared, ModuleMetadata):
                     raise ValueError("Entry-point plugin must expose ModuleMetadata as METADATA")
-                declared.validate()
                 if declared.key in self._plugins:
                     raise ValueError("Plugin key already registered: %s" % declared.key)
                 self._plugins[declared.key] = PluginRegistration(
