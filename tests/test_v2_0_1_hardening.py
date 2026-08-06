@@ -5,7 +5,24 @@ import unittest
 
 from dedsec.core.evidence import redact_value
 from dedsec.core.exporters import export_csv, export_html, export_report
+from dedsec.core.research_pipeline import ResearchPipeline
 from dedsec.core.templates import TemplateDefinition
+
+
+class _NoNetworkContext:
+    def __init__(self):
+        self.scan_id = "scan-policy"
+        self.target_url = "https://example.com/"
+        self.domain = "example.com"
+        self.timeout = 2
+        self.default_headers = {}
+        self.identity_id = "identity-anonymous"
+
+    def get_transport(self, *args, **kwargs):
+        return self
+
+    def request(self, *args, **kwargs):
+        raise AssertionError("Impact policy should have prevented network execution")
 
 
 class V201HardeningTests(unittest.TestCase):
@@ -90,6 +107,40 @@ class V201HardeningTests(unittest.TestCase):
                     "extractors": [{"name": "value", "type": "regex", "pattern": "["}],
                 }
             )
+
+    def test_passive_pipeline_policy_skips_normal_network_path_probe(self):
+        result = ResearchPipeline(_NoNetworkContext()).prepare(maximum_impact="passive")
+        self.assertEqual(result.metadata["network_paths"]["status"], "skipped")
+        self.assertEqual(result.metadata["network_paths"]["reason"], "impact-policy")
+
+    def test_passive_pipeline_rejects_deep_discovery(self):
+        with self.assertRaisesRegex(ValueError, "require maximum impact normal"):
+            ResearchPipeline(_NoNetworkContext()).prepare(
+                deep=True,
+                maximum_impact="passive",
+            )
+
+    def test_pipeline_template_ceiling_cannot_exceed_global_impact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "active.yml")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "id: active-template\n"
+                    "name: Active template\n"
+                    "impact: active-safe\n"
+                    "request:\n"
+                    "  method: GET\n"
+                    "  path: /\n"
+                    "matchers:\n"
+                    "  - type: status\n"
+                    "    value: 200\n"
+                )
+            result = ResearchPipeline(_NoNetworkContext()).prepare(
+                template_dirs=[tmpdir],
+                maximum_impact="passive",
+            )
+        self.assertEqual(result.metadata["templates"]["counts"].get("skipped"), 1)
+        self.assertEqual(result.metadata["templates"]["results"][0]["reason"], "impact-policy")
 
     def test_csv_export_neutralizes_spreadsheet_formula_cells(self):
         report = {
