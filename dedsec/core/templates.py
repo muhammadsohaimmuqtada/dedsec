@@ -212,7 +212,20 @@ class TemplateRunner:
     ):
         self.context = context
         self.workspace = workspace
-        self.maximum_impact = maximum_impact
+        requested_ceiling = str(maximum_impact or "active-safe").lower()
+        scan_ceiling = str(
+            (getattr(context, "metadata", {}) or {}).get("maximum_impact")
+            or requested_ceiling
+        ).lower()
+        if requested_ceiling not in IMPACT_LEVELS:
+            raise ValueError("Unknown template impact ceiling: %s" % requested_ceiling)
+        if scan_ceiling not in IMPACT_LEVELS:
+            raise ValueError("Unknown scan impact ceiling: %s" % scan_ceiling)
+        self.maximum_impact = (
+            requested_ceiling
+            if impact_allowed(requested_ceiling, scan_ceiling)
+            else scan_ceiling
+        )
         self.transport = context.get_transport()
 
     @staticmethod
