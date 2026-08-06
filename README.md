@@ -1,41 +1,27 @@
-```
-    ██████╗ ███████╗██████╗ ███████╗███████╗ ██████╗
-    ██╔══██╗██╔════╝██╔══██╗██╔════╝██╔════╝██╔════╝
-    ██║  ██║█████╗  ██║  ██║███████╗█████╗  ██║
-    ██║  ██║██╔══╝  ██║  ██║╚════██║██╔══╝  ██║
-    ██████╔╝███████╗██████╔╝███████║███████╗╚██████╗
-    ╚═════╝ ╚══════╝╚═════╝ ╚══════╝╚══════╝ ╚═════╝
-```
-
 # DEDSEC — Web Reconnaissance Framework
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=flat-square&logo=python)
-![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
-![Author](https://img.shields.io/badge/Author-Sohaim-red?style=flat-square)
+[![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-DEDSEC is an advanced, modular web reconnaissance framework for the recon phase of authorized penetration testing. Scan targets for technology fingerprints, DNS records, open ports, SSL issues, security misconfigurations, and more — all from a single CLI.
-
----
+DEDSEC is a modular reconnaissance framework for authorized web security testing. It brings common recon tasks into a single CLI, including WAF fingerprinting, technology detection, DNS inspection, TLS analysis, port checks, subdomain discovery, and endpoint extraction.
 
 ## Features
 
 | # | Module | Description |
-|---|--------|-------------|
-| 1 | 🛡️ WAF Detection | Detects 12+ WAFs with confidence scoring and trigger payloads |
-| 2 | 🌐 Tech Fingerprinting | Languages, servers, CMS, JS frameworks, CDN, analytics |
-| 3 | 🔍 DNS Recon | A/AAAA/MX/NS/TXT/CNAME/SOA records + zone transfer attempt |
-| 4 | 🌍 IP & GeoLocation | IP resolve + country, city, ISP, ASN via ip-api.com |
-| 5 | 🔒 SSL/TLS Analysis | Cert expiry, SANs, protocol version, serial number |
-| 6 | 📋 Header Audit | 12 security headers check + information disclosure detection |
-| 7 | 🚪 Open Redirect | Tests 15 common redirect parameters for open redirect |
-| 8 | 🤖 Robots & Sitemap | Parses robots.txt + probes common sitemap URLs |
-| 9 | 🍪 Cookie Audit | HttpOnly, Secure, SameSite flag checks with risk explanations |
-| 10 | 📡 Port Scan | Top 25 ports via concurrent scanning with service names |
-| 11 | 🕵️ WHOIS Lookup | Registrar, dates, nameservers, org, country |
-| 12 | 🌐 Subdomain Enum | Passive via crt.sh Certificate Transparency (up to 50) |
-| 13 | 📜 JS & Endpoint Extraction | JS files, API endpoints, email addresses from page source |
-
----
+|---|---|---|
+| 1 | WAF Detection | Detects 12+ WAFs with confidence scoring and trigger payloads |
+| 2 | Tech Fingerprinting | Languages, servers, CMS, JS frameworks, CDN, analytics |
+| 3 | DNS Recon | A/AAAA/MX/NS/TXT/CNAME/SOA records + zone transfer attempt |
+| 4 | IP & GeoLocation | IP resolve + country, city, ISP, ASN via ip-api.com |
+| 5 | SSL/TLS Analysis | Cert expiry, SANs, protocol version, serial number |
+| 6 | Header Audit | 12 security headers check + information disclosure detection |
+| 7 | Open Redirect | Tests 15 common redirect parameters for open redirect |
+| 8 | Robots & Sitemap | Parses robots.txt + probes common sitemap URLs |
+| 9 | Cookie Audit | HttpOnly, Secure, SameSite flag checks with risk explanations |
+| 10 | Port Scan | Top 25 ports via concurrent scanning with service names |
+| 11 | WHOIS Lookup | Registrar, dates, nameservers, org, country |
+| 12 | Subdomain Enum | Passive via crt.sh Certificate Transparency (up to 50) |
+| 13 | JS & Endpoint Extraction | JS files, API endpoints, email addresses from page source |
 
 ## Installation
 
@@ -50,8 +36,6 @@ Or install dependencies manually:
 ```bash
 pip install -r requirements.txt
 ```
-
----
 
 ## Usage
 
@@ -118,7 +102,7 @@ python -m dedsec https://example.com
 
 ### All Options
 
-```
+```text
 usage: dedsec [OPTIONS] URL
 
 positional arguments:
@@ -139,8 +123,6 @@ options:
   --version            Show version and exit
 ```
 
----
-
 ## Requirements
 
 - Python 3.8+
@@ -150,14 +132,10 @@ options:
 - `rich==13.9.4`
 - `typer==0.12.5`
 
----
-
 ## Legal Disclaimer
 
-> **For authorized testing only. Unauthorized use is illegal and unethical. Always obtain explicit written permission before scanning any system you do not own.**
-
----
+> For authorized testing only. Obtain explicit written permission before scanning systems you do not own.
 
 ## Author
 
-**Sohaim** — Recon phase pentesting tooling
+Sohaim Muqtada
