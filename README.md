@@ -1,309 +1,374 @@
-# DEDSEC — Evidence-Driven Web Reconnaissance Framework
+# DEDSEC — Evidence-Driven Reconnaissance & Application-Surface Research
 
-[![Version](https://img.shields.io/badge/version-1.3.1-4c8bf5?style=flat-square)](https://github.com/muhammadsohaimmuqtada/dedsec)
+[![Version](https://img.shields.io/badge/version-2.0.0-4c8bf5?style=flat-square)](https://github.com/muhammadsohaimmuqtada/dedsec)
 [![Python](https://img.shields.io/badge/Python-3.8--3.13-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![CI](https://img.shields.io/github/actions/workflow/status/muhammadsohaimmuqtada/dedsec/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/muhammadsohaimmuqtada/dedsec/actions)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-DEDSEC is a modular reconnaissance framework for **authorized web security testing**. It combines attack-surface discovery, service profiling, web-configuration analysis, endpoint extraction, evidence capture, and structured reporting in a single CLI.
+DEDSEC is a modular reconnaissance and application-surface research framework for **authorized security testing**. Version 2.0 keeps the original 24 reconnaissance/security-posture modules, but adds the stateful layers needed for deeper research: a canonical asset graph, endpoint/request corpus, insertion-point model, bounded crawler, explicit authentication contexts, OpenAPI import, project history/diff, passive analysis, declarative checks, coverage telemetry, and multi-format reporting.
 
-The 1.3 release line is benchmark-driven. Version 1.3.0 introduced killable module processes, hard scan deadlines, scoped target HTTP, stronger evidence handling, and conservative detector semantics. Version 1.3.1 adds target-reachability awareness so an unavailable or filtered target is reported as an operational condition instead of causing repeated long waits or misleading security conclusions.
+DEDSEC is intentionally conservative. A successful request, a template match, a missing header, a reflected input, or an open port is not automatically a vulnerability. The framework separates observations, candidates/hypotheses, verified findings, transport failures, and incomplete coverage.
+
+> **Authorization required.** Use DEDSEC only against systems you own or are explicitly authorized to test. The project does not provide an anti-WAF/IDS evasion mode, automatic account creation, destructive exploit automation, or automatic state-changing template execution.
 
 ## Project status
 
-| Component | Current state |
+| Component | DEDSEC 2.0 |
 | --- | --- |
-| Package version | `1.3.1` |
+| Package | `2.0.0` |
 | Built-in modules | `24` |
-| Report schema | `2.1` |
-| Supported Python | `3.8`–`3.13` |
-| Execution | Process-isolated concurrent modules with hard deadlines |
-| Target HTTP | Scoped, verified TLS, bounded redirects, shared request budget |
-| Reachability | Bounded preflight + shared root-target health circuit |
-| Module outcomes | `SUCCESS`, `PARTIAL`, `INCONCLUSIVE`, `FAILED`, `TIMEOUT`, `ABORTED` |
-| Evidence | Scan IDs, SHA-256 evidence references, redaction, ANSI-clean artifacts |
+| Report schema | `3.0` |
+| Python | `3.8`–`3.13` |
+| Runtime | Process-isolated modules with hard module/global deadlines |
+| HTTP | Scoped, verified TLS, bounded redirects, exact request budget, total logical deadlines |
+| Reachability | Bounded preflight + shared target-health circuit + multi-address IPv4/IPv6 telemetry |
+| Application model | Asset graph + endpoint graph + request corpus + insertion points + identities |
+| Discovery | Static bounded crawler; optional bounded Playwright SPA observation |
+| Authentication | Explicit researcher-supplied header/basic/bearer/API-key/cookie/workflow profiles |
+| API input | OpenAPI 3 / Swagger 2 request-corpus import |
+| Persistent research | Redacted SQLite project history, checkpoints, resume, and cross-scan diff |
+| Extensibility | Validated Python entry-point plugins + declarative checks |
+| Output | JSON, JSONL, SARIF, CSV, HTML |
 | Finding model | Observation → candidate/hypothesis → verified finding |
-| Legacy compatibility | `safe_request()` inherits the v2 HTTP runtime inside module processes |
-| CI | Ruff + compile + unittest/package/CLI matrix |
 
-## Highlights
-
-- 24 built-in reconnaissance and security-posture modules
-- process-isolated module execution: blocked modules can be terminated instead of holding the scanner indefinitely
-- hard per-module and global scan deadlines
-- bounded TCP preflight for target reachability telemetry
-- process-shared target-health state to prevent every HTTP module from independently reproving the same outage
-- total logical HTTP request deadlines: retries and backoff do not multiply `--timeout`
-- explicit `PARTIAL` and `INCONCLUSIVE` outcomes for incomplete evidence
-- TCP port states preserved as open, closed, filtered/timeout, unreachable, or error
-- centralized target HTTP scope and request budgeting
-- TLS verification enabled by default with no automatic insecure fallback
-- redirect scope enforcement: automatic redirects are not followed outside target scope
-- exact target HTTP retry-attempt accounting in the v2 transport
-- cache keys vary by headers, request body, parameters, and redirect behavior
-- evidence IDs, sensitive-value redaction, ANSI-clean evidence, and optional atomic artifacts
-- conservative observation → candidate → verified-finding correlation
-- versioned JSON report schema with runtime and reachability metadata
-- Python 3.8–3.13 CI matrix
+The package remains **Beta**. CI and regression tests establish tested behavior; they do not prove the absence of every defect or false positive.
 
 ## Architecture
 
 ```text
-CLI
- │
- ├── bounded TCP preflight
- │         │
- │         ▼
- │   TargetHealth
- │   ├── reachable
- │   ├── degraded
- │   └── unreachable / temporary circuit
- │
- ▼
-ScanContext
- ├── ScopePolicy
- ├── target HTTP request budget
- ├── evidence identity
- ├── TargetHealth
- └── TransportEngine
+Target + Scan Policy
+        │
+        ├── host / port / path scope
+        ├── impact ceiling
+        ├── request budget / deadlines
+        └── optional identity
         │
         ▼
-Process Supervisor
- ├── hard module deadline
- ├── hard global deadline
- ├── Ctrl+C / abort termination
- ├── bounded concurrency
- └── HTTP-required module short-circuit when target is unreachable
+Reachability + Discovery
         │
-   ┌────┴───────────────────────────┐
-   ▼                                ▼
-run_with_context(context)     legacy run(url, ...)
-   │                                │
-   └──────────────┬─────────────────┘
-                  ▼
-       scoped target HTTP bridge
-                  │
-                  ▼
-      Module terminal outcome
-SUCCESS / PARTIAL / INCONCLUSIVE /
-FAILED / TIMEOUT / ABORTED
-                  │
-                  ▼
-       Evidence + correlation
-                  │
-                  ▼
-Observation → hypothesis → verified finding
-                  │
-                  ▼
-           JSON schema 2.1
+        ├── DNS / TLS / ports / WHOIS / OSINT
+        ├── bounded HTTP crawler
+        ├── optional browser observation
+        ├── JavaScript candidates
+        └── OpenAPI / Swagger input
+        │
+        ▼
+ResearchWorkspace
+        │
+        ├── AssetGraph
+        ├── EndpointGraph
+        ├── RequestCorpus
+        ├── InsertionPoints
+        ├── IdentityContexts
+        ├── Response metadata
+        └── CoverageTracker
+        │
+        ├──────────────┐
+        ▼              ▼
+PassivePipeline   Bounded Audit / Templates
+        │              │
+        └──────┬───────┘
+               ▼
+      Evidence + Correlation
+               │
+        observation / candidate
+               │
+          verified finding
+               │
+               ▼
+   Report schema 3.0 + Project DB
+     history / diff / resume / export
 ```
 
-Each selected module executes in its own child process. The parent supervisor owns hard deadlines and can terminate a blocked child. Legacy modules remain compatible, but their `safe_request()` target HTTP calls are bound to the scan context inside that process, including calls made from module worker threads.
+The original modules remain useful producers of evidence. They are no longer the only source of knowledge: DEDSEC 2.0 correlates discovered hosts, IPs, services, certificates, URLs, endpoints, request shapes, identities, and scan coverage inside one research workspace.
 
-## Reachability and resilience semantics
-
-DEDSEC separates **target availability** from **security findings**.
-
-Before module execution, DEDSEC normally performs a bounded TCP connection preflight to the service implied by the supplied target URL. For `https://example.com`, that means TCP 443 unless an explicit port is supplied. The preflight sends no HTTP request and no application payload.
-
-Two failed preflight connection attempts can mark the root target temporarily unreachable. While that short circuit is open, modules that fundamentally require root-target HTTP are recorded as `INCONCLUSIVE` instead of being launched to repeat the same transport failure. DNS, WHOIS, raw TCP, TLS, geo/network, email-DNS, and mixed-source discovery can continue according to their own module behavior.
-
-The health state is deliberately narrow. `UNREACHABLE` means DEDSEC could not establish the required transport path from the scanner's current network position. It does **not** claim that the target is globally down, blocked by a specific product, or intentionally filtering the researcher.
-
-Use `--skip-preflight` only when you intentionally want modules to attempt the target without the initial TCP reachability check.
-
-## Enforcement boundaries
-
-DEDSEC distinguishes **target HTTP traffic** from other network operations.
-
-For target HTTP requests made through the DEDSEC HTTP helper/runtime, 1.3.1 enforces:
-
-- target host/subdomain scope policy;
-- optional root-only policy;
-- TLS verification;
-- bounded redirect following with scope checks on each hop;
-- shared target HTTP request budget;
-- bounded retries and backoff inside one logical request deadline;
-- root-target reachability feedback and temporary short-circuiting;
-- cache isolation for header/body-varying requests.
-
-`--timeout` is the **total logical deadline for one DEDSEC HTTP request**, including retries and backoff. For example, `--timeout 10 --retries 3` does not grant four independent ten-second waits; the complete logical request remains bounded to approximately ten seconds.
-
-The `--max-requests` value is specifically a **target HTTP request budget**. DNS queries, WHOIS lookups, raw TCP port connections, TLS protocol probes, and approved external-intelligence lookups are not represented as target HTTP requests and are not counted in that number. Those operations remain bounded by their own operation timeouts and by the process-level module/global deadlines.
-
-Built-in external HTTP intelligence sources are narrowly allowlisted for modules that use them. Unknown out-of-scope HTTP destinations fail closed while a scan context is active.
-
-## Module outcome model
-
-A process completing is not automatically the same as a conclusive scan result.
-
-- **SUCCESS** — the module completed its intended evidence collection without a material execution limitation.
-- **PARTIAL** — useful evidence was collected, but part of the module's intended collection was unavailable.
-- **INCONCLUSIVE** — the module could not gather enough evidence to support either a positive or negative conclusion, commonly because the required target transport was unavailable.
-- **FAILED** — the module encountered a non-timeout execution failure.
-- **TIMEOUT** — a configured hard module or global deadline terminated the work.
-- **ABORTED** — execution was intentionally stopped, including user cancellation.
-
-A `PARTIAL`, `INCONCLUSIVE`, `FAILED`, `TIMEOUT`, or `ABORTED` module must not be interpreted as evidence that a vulnerability is absent.
-
-## Modules
-
-| Key | Module | Purpose |
-| --- | --- | --- |
-| `waf` | WAF Detection | Bounded vendor-signature and response-behavior fingerprinting |
-| `tech` | Technology Fingerprinting | Server, framework, CMS, CDN, and stack signals |
-| `dns` | DNS Reconnaissance | DNS records, authentication posture, DNSSEC, and explicitly labeled AXFR check |
-| `geo` | IP & GeoLocation | IP, ASN, network, and geographic context |
-| `ssl` | SSL/TLS Analysis | Verified certificate and protocol analysis |
-| `headers` | HTTP Header Audit | Weighted header-coverage and disclosure posture |
-| `redirect` | Open Redirect Check | Controlled redirect analysis with negative controls and no external-follow behavior |
-| `robots` | Robots & Sitemap | robots.txt and sitemap discovery |
-| `cookies` | Cookie Audit | Cookie security attributes and scope |
-| `ports` | Port Exposure Scan | Bounded TCP service discovery with explicit network-state classification |
-| `whois` | WHOIS Lookup | Registration metadata |
-| `subdomains` | Subdomain Enumeration | Multi-source discovery, provenance, unresolved-candidate preservation, and validation |
-| `js` | JS & Endpoint Extraction | In-scope JS assets, typed routes, API candidates, and conservative secret-shape detection |
-| `hosting` | Hosting Intelligence | Hosting and network-provider context; may complete partially without target HTTP |
-| `exposures` | Common Exposure Checks | Signature-validated sensitive exposures plus rejected/unverified outcomes |
-| `cors` | CORS Check | Cross-origin configuration candidates without impact overclaiming |
-| `csp` | CSP Analyzer | CSP hardening observations and directive analysis |
-| `ratelimit` | Rate-Limit Observation | Small bounded throttling sample; absence of 429 is not declared a vulnerability |
-| `clickjacking` | Framing Posture | Framing restrictions and potential frameability observations |
-| `email` | Email Security | DNS-only SPF, DMARC, DKIM-selector discovery, and MX posture by default |
-| `vhost` | Virtual Host Finder | In-scope Host-header response-difference candidates; no baseline means inconclusive |
-| `api_schema` | API & OpenAPI Scanner | Public schema discovery and deduplicated endpoint extraction |
-| `http_methods` | HTTP Methods Audit | Method declarations and bounded TRACE validation; transport loss becomes partial/inconclusive |
-| `security_policy` | Security Policy Audit | security.txt and disclosure-policy discovery |
-
-## Installation
+## Install
 
 ```bash
-git clone https://github.com/muhammadsohaimmuqtada/dedsec.git
-cd dedsec
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e .
+pip install -e .
 ```
 
-For development:
+Development install:
 
 ```bash
-python -m pip install -e '.[dev]'
+pip install -e '.[dev]'
 ```
 
-## Usage
+Optional browser discovery:
 
-Run the complete module set:
+```bash
+pip install -e '.[browser]'
+playwright install chromium
+```
+
+Browser support is optional. Static crawling, API import, project history, templates, and the built-in modules do not require Playwright.
+
+## Basic scan
+
+The familiar scan path remains available:
 
 ```bash
 dedsec https://example.com
 ```
 
-Run selected modules:
-
-```bash
-dedsec https://example.com --modules tech,dns,ssl,headers
-```
-
-Use explicit execution boundaries:
+Select modules:
 
 ```bash
 dedsec https://example.com \
-  --concurrency 4 \
-  --timeout 10 \
-  --module-timeout 120 \
-  --global-timeout 600 \
-  --module-retries 0 \
-  --max-requests 1000
+  --modules dns,ssl,headers,subdomains,js,ports
 ```
 
-Tune or bypass preflight deliberately:
+The 24 built-ins are:
 
-```bash
-dedsec https://example.com --preflight-timeout 3
-
-dedsec https://example.com --skip-preflight
+```text
+waf, tech, dns, geo, ssl, headers, redirect, robots,
+cookies, ports, whois, subdomains, js, hosting, exposures,
+cors, csp, ratelimit, clickjacking, email, vhost,
+api_schema, http_methods, security_policy
 ```
 
-Restrict target HTTP to the root host:
-
-```bash
-dedsec https://example.com --root-only
-```
-
-Persist redacted evidence and the report:
+## Deep application discovery
 
 ```bash
 dedsec https://example.com \
-  --evidence-dir ./dedsec-evidence \
+  --deep \
+  --crawl-depth 3 \
+  --crawl-pages 200 \
+  --project .dedsec/example.db \
   --output report.json
 ```
 
-Print the machine-readable report:
+The static crawler:
+
+- follows only URLs allowed by central scope policy;
+- uses bounded depth/page/body limits;
+- records HTML forms but **does not submit them**;
+- records JavaScript request candidates;
+- feeds observed responses into passive analyzers;
+- records request shapes and insertion points;
+- does not keep response bodies in persistent workspace snapshots.
+
+## Input-surface coverage
+
+`--audit-inputs` currently enables a deliberately narrow built-in active audit: a harmless deterministic marker is substituted into one **GET/HEAD query parameter at a time**, with a negative baseline control. Reflection is recorded as an `INFO` surface observation only.
 
 ```bash
-dedsec https://example.com --json
+dedsec https://example.com \
+  --deep \
+  --audit-inputs \
+  --audit-max-requests 100 \
+  --audit-max-points 250
 ```
 
-Run through Python:
+This audit does **not** automatically send script payloads, SQL syntax, command syntax, path traversal payloads, or state-changing methods.
+
+## Authentication contexts
+
+Authentication is explicit. DEDSEC never attempts to register an account on its own.
 
 ```bash
-python -m dedsec https://example.com
+dedsec https://example.com \
+  --auth examples/auth-profile.example.yml \
+  --deep
 ```
 
-### Curated profile
+Supported profile kinds:
+
+- `headers`
+- `basic`
+- `bearer`
+- `api_key` (header)
+- `cookie`
+- bounded `workflow` using explicit `GET`, `HEAD`, or `POST` steps
+
+Credentials are runtime material. Persistent workspace/report/project serialization redacts sensitive headers, cookies, body keys, and sensitive insertion-point values. Authentication material is bound to the exact configured target origin; DEDSEC strips `Authorization`, `Proxy-Authorization`, and `Cookie` when its manual HTTP redirect crosses to a different scheme/host/effective-port, even if the destination host is otherwise in scope.
+
+A configured credential is **not** reported as a verified authenticated identity unless the profile contains an explicit verification rule and that rule succeeds.
+
+See [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md).
+
+## OpenAPI / Swagger request corpus
 
 ```bash
-dedsec https://example.com --market
+dedsec https://example.com \
+  --api-spec ./openapi.yaml \
+  --project .dedsec/example.db
 ```
 
-`--market` is a **mixed-impact authorized-testing profile**, not a passive-only mode. Review the target's written scope and testing rules before using it.
+OpenAPI/Swagger import records:
 
-## Timeout semantics
+- method + path/template;
+- path/query/header parameters;
+- JSON/body shapes and insertion points;
+- operation IDs and summaries;
+- declared authentication schemes;
+- state-changing methods.
 
-DEDSEC 1.3.1 separates three deadlines:
+Importing a schema does **not** execute its `POST`, `PUT`, `PATCH`, or `DELETE` operations. They are tagged as recorded/not-executed surfaces.
 
-- `--timeout`: total logical deadline for one DEDSEC HTTP request, including retries/backoff;
-- `--module-timeout`: hard wall-clock deadline for each module process, default `120s`;
-- `--global-timeout`: hard wall-clock deadline for the complete scan, default `600s`.
+## Reproducible scan plans
 
-Module-specific DNS, socket, WHOIS, TLS, or other non-HTTP operations may use their own bounded operation timeout internally. They are still contained by the hard module/global process deadlines.
+```bash
+dedsec --plan examples/scan-plan.example.yml
+```
 
-If a module blocks inside a library or socket call beyond its module deadline, the parent process terminates it and records a terminal timeout result. A global timeout terminates active modules and marks work that never started as timed out. Ctrl+C uses the same process-termination path rather than waiting indefinitely for worker threads.
+Plans can define target, modules, host/port/path scope, discovery limits, traffic budgets, maximum impact, project storage, templates, authentication profile, API schemas, and exports.
 
-## Evidence and reporting
+Impact classes are ordered:
 
-DEDSEC separates collection from security conclusions. A report may contain:
+```text
+passive < normal < active-safe < state-changing < high-impact
+```
 
-- **observations** — facts collected from the target or supporting intelligence;
-- **candidates / hypotheses** — positive security signals that still require verification;
-- **verified findings** — findings promoted only when module verification semantics and evidence references support the claim;
-- **rejected or unverified outcomes** — negative controls, signature mismatches, transport failures, or deliberately unpromoted signals.
+A module/check whose declared impact exceeds the configured ceiling is blocked before execution.
 
-Evidence records contain scan identity, module provenance, timestamps, SHA-256 digests, redacted structured data, and optional atomic JSON artifacts. Terminal ANSI styling is removed before evidence persistence.
+See [`docs/SCAN_PLANS.md`](docs/SCAN_PLANS.md).
 
-Schema 2.1 runtime metadata records target HTTP request use, preflight telemetry, target-health state, and traffic classes that are not part of the target HTTP budget.
+## Project history, resume, and diff
 
-## Detector precision principles
+```bash
+dedsec https://example.com \
+  --deep \
+  --project .dedsec/example.db
+```
 
-DEDSEC deliberately avoids several common scanner shortcuts:
+Resume from the latest crawler checkpoint:
 
-- an HTTP `403` or `404` is a real response, not a network failure;
-- an exposed-looking path is not confirmed without the expected content/format signature;
-- a WordPress/admin route is a surface observation, not automatically a vulnerability;
-- no `429` in a small sample does not prove missing rate limiting;
-- missing CSP or framing headers are hardening/frameability observations, not proof of XSS/clickjacking;
-- reflected CORS headers are not a verified vulnerability without demonstrated cross-origin impact;
-- a DKIM search across common selectors cannot prove DKIM is absent;
-- an open port is an exposure observation; severity depends on the service and access context;
-- a TCP timeout is not reported as a confirmed closed port;
-- target unreachability is an execution condition, not a security finding;
-- WAF/CDN fingerprinting reports uncertainty when vendor-specific evidence is insufficient.
+```bash
+dedsec https://example.com \
+  --deep \
+  --project .dedsec/example.db \
+  --resume
+```
 
-## Development and contribution
+The SQLite project store keeps redacted snapshots of assets, edges, requests, observations, and reports. Cross-scan diffs report new, removed, and changed entities.
 
-Install development dependencies and run:
+A removed observation in a later scan is **not by itself proof of remediation**: coverage or reachability may have changed. Use the coverage and runtime sections when interpreting project diffs.
+
+## Declarative checks
+
+```bash
+dedsec https://example.com \
+  --template-dir examples/templates
+```
+
+Declarative checks support:
+
+- explicit impact class;
+- request or passive mode;
+- status/header/word/regex request matchers;
+- negative matchers;
+- header/regex request extractors;
+- optional SHA-256 file-integrity verification;
+- candidate/observation classification.
+
+Important boundaries:
+
+- templates cannot self-declare `verified-finding`;
+- state-changing template methods are recorded but not auto-executed;
+- passive templates send zero traffic;
+- passive templates cannot use body matchers because DEDSEC intentionally does not retain response bodies in the workspace;
+- SHA-256 proves content integrity against a declared digest, **not author authenticity**.
+
+See [`docs/TEMPLATES.md`](docs/TEMPLATES.md).
+
+## Optional browser discovery
+
+```bash
+dedsec https://example.com --deep --browser
+```
+
+The browser adapter observes SPA/browser requests and navigable links. It does not auto-submit forms or click mutation controls. Sensitive browser headers are restricted to the exact configured target origin; cookie profiles are installed for that target URL rather than copied as a global browser header.
+
+## Scope
+
+Root + subdomains is the default target-HTTP scope. `--root-only` limits target HTTP to the root host.
+
+Scan plans additionally support:
+
+- explicit allowed/denied hosts;
+- allowed ports;
+- path include globs/regexes;
+- path exclude globs/regexes.
+
+Path exclusions are applied before path inclusions. Redirects are manually followed only while the destination remains in scope.
+
+## Reachability and adaptive resilience
+
+DEDSEC separates target availability from findings.
+
+The root service receives a bounded TCP preflight. Repeated target transport failures open a shared temporary health circuit, allowing HTTP-dependent modules to terminate as `INCONCLUSIVE` instead of spending their full deadlines reproving the same outage. DNS, WHOIS, raw TCP and other independent work can continue.
+
+DEDSEC also records all DNS-resolved IPv4/IPv6 paths and classifies bounded connection state as reachable, refused, filtered/timeout, unreachable, or error. HTTP retries stay inside one logical request deadline and `Retry-After` is honored for relevant retryable responses.
+
+This is resilience and load reduction—not firewall/WAF evasion.
+
+## Coverage
+
+Schema 3.0 reports include research coverage such as:
+
+- requests discovered;
+- responses observed;
+- requests audited/skipped;
+- insertion points discovered/audited/skipped;
+- skipped-reason counts;
+- assets/endpoints observed.
+
+`0 findings` must be interpreted together with coverage. DEDSEC does not equate a clean partial scan with proof that an application is vulnerability-free.
+
+## Exports
+
+```bash
+dedsec https://example.com \
+  --deep \
+  --export json,jsonl,sarif,csv,html \
+  --export-dir ./reports
+```
+
+The canonical report schema is JSON `3.0`. Other formats are derived from that report.
+
+## Runtime guarantees and boundaries
+
+For target HTTP sent through the DEDSEC runtime:
+
+- TLS verification is enabled by default;
+- no automatic insecure TLS fallback;
+- root/subdomain/port/path scope enforcement;
+- cross-scope redirects are not followed;
+- target HTTP requests share one budget;
+- retries consume budget per on-wire attempt;
+- retries/backoff do not multiply `--timeout`;
+- module processes have killable hard deadlines;
+- global scan deadline terminates active children;
+- Ctrl+C terminates active module processes.
+
+`--max-requests` counts **target HTTP** requests. It does not claim to meter DNS, WHOIS, raw TCP sockets, TLS handshakes, or external-intelligence traffic.
+
+## Finding semantics
+
+DEDSEC distinguishes:
+
+```text
+observation
+    ↓
+candidate / hypothesis
+    ↓
+verified finding
+```
+
+Examples:
+
+- open TCP port → service observation;
+- missing security header → posture/hardening observation;
+- arbitrary CORS reflection → candidate until readable sensitive impact is demonstrated;
+- frameability → observation, not automatic clickjacking vulnerability;
+- declarative template match → observation/candidate, never self-verified;
+- content-signature-backed sensitive exposure + evidence → eligible for verified correlation.
+
+## Development gates
 
 ```bash
 ruff check .
@@ -311,32 +376,17 @@ python -m unittest discover -s tests -v
 python -m compileall -q dedsec tests
 ```
 
-CI runs the package/test/CLI matrix on Python 3.8, 3.11, 3.12, and 3.13.
+CI runs lint/compile plus package/unit/CLI smoke tests across Python 3.8, 3.11, 3.12 and 3.13.
 
-Contributions must keep network behavior bounded, protect sensitive data, respect target scope, and distinguish heuristic candidates from verified findings. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before proposing scanner or architecture changes.
+## Documentation
 
-## Repository standards
-
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — engineering, testing, evidence, runtime, and pull-request standards
-- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — professional community and security-research conduct
-- [`SECURITY.md`](SECURITY.md) — supported versions and coordinated vulnerability disclosure
-- [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) — code-change quality review
-- [`.github/ISSUE_TEMPLATE/bug_report.md`](.github/ISSUE_TEMPLATE/bug_report.md) — structured bug reporting
-
-## Security
-
-Security issues **in DEDSEC itself** should be handled according to [`SECURITY.md`](SECURITY.md), not through a public issue containing exploit details or sensitive evidence.
-
-Findings discovered against third-party systems should be disclosed through the target owner's authorized vulnerability-disclosure or bug-bounty process.
-
-## Legal and authorized use
-
-DEDSEC is intended for systems you own or have explicit authorization to test. You are responsible for the written scope, testing rules, rate limits, and disclosure requirements of the system or bug-bounty program you assess.
+- [`docs/DEDSEC_2_ARCHITECTURE.md`](docs/DEDSEC_2_ARCHITECTURE.md)
+- [`docs/SCAN_PLANS.md`](docs/SCAN_PLANS.md)
+- [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md)
+- [`docs/TEMPLATES.md`](docs/TEMPLATES.md)
+- [`SECURITY.md`](SECURITY.md)
+- [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
-
-## Author
-
-Sohaim Muqtada
+MIT. See [`LICENSE`](LICENSE).
