@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from dedsec.modules import api_schema_scanner, clickjacking_check, cors_check
 from dedsec.modules import csp_analyzer, exposure_checks, http_methods_audit
@@ -44,14 +44,15 @@ class SurfaceModuleTests(unittest.TestCase):
         rejected_ids = {item["id"] for item in result["rejected"]}
         self.assertIn("dotenv", rejected_ids)
         self.assertIn("dotenv_local", rejected_ids)
+        self.assertIn("dotenv_development", rejected_ids)
 
     @patch("dedsec.modules.open_redirect.safe_request")
     def test_open_redirect_requires_control_validation(self, mock_safe_request):
-        # Base page, then attacker/control for first GET param. Remaining calls are benign.
         responses = [
             FakeResponse(status_code=200, text="landing page"),
-            FakeResponse(status_code=302, headers={"Location": "https://evil.example.com"}),
+            FakeResponse(status_code=302, headers={"Location": open_redirect.ATTACKER_URL}),
             FakeResponse(status_code=302, headers={"Location": "https://example.com/home"}),
+            FakeResponse(status_code=200, text="home"),
         ]
         responses.extend(FakeResponse(status_code=200) for _ in range(200))
         mock_safe_request.side_effect = responses
@@ -59,6 +60,7 @@ class SurfaceModuleTests(unittest.TestCase):
         result = open_redirect.run("https://example.com/login", "example.com")
         self.assertGreaterEqual(len(result["confirmed"]), 1)
         self.assertEqual(result["confirmed"][0]["param"], "url")
+        self.assertEqual(result["confirmed"][0]["location"], open_redirect.ATTACKER_URL)
 
     @patch("dedsec.modules.subdomain_enum.get_wildcard_ips", return_value=set())
     @patch("dedsec.modules.subdomain_enum._reverse_ip_lookup", return_value=set())
@@ -92,17 +94,22 @@ class SurfaceModuleTests(unittest.TestCase):
 
     @patch("dedsec.modules.cors_check.safe_request")
     def test_cors_reflection_with_credentials_is_candidate_not_verified(self, mock_request):
-        mock_request.return_value = FakeResponse(
-            status_code=200,
-            headers={
-                "Access-Control-Allow-Origin": "https://evil.example.com",
-                "Access-Control-Allow-Credentials": "true",
-            },
-        )
+        def side_effect(url, headers=None, **kwargs):
+            origin = (headers or {}).get("Origin", "")
+            return FakeResponse(
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Credentials": "true",
+                },
+            )
+
+        mock_request.side_effect = side_effect
         result = cors_check.run("https://example.com", "example.com")
         self.assertFalse(result["vulnerable"])
         self.assertTrue(result["findings"][0]["candidate"])
         self.assertFalse(result["findings"][0]["confirmed"])
+        self.assertEqual(result["findings"][0]["origin"], "https://attacker.invalid")
 
     @patch("dedsec.modules.csp_analyzer.safe_request")
     def test_csp_analyzer_records_unsafe_directives_as_posture(self, mock_safe_request):
