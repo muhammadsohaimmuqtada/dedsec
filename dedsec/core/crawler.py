@@ -56,6 +56,11 @@ class _SurfaceParser(HTMLParser):
     def _attrs(attrs: Sequence[Tuple[str, Optional[str]]]) -> Dict[str, str]:
         return {str(k).lower(): "" if v is None else str(v) for k, v in attrs}
 
+    def _finish_form(self) -> None:
+        if self._form is not None:
+            self.forms.append(self._form)
+            self._form = None
+
     def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
         values = self._attrs(attrs)
         tag = tag.lower()
@@ -64,30 +69,38 @@ class _SurfaceParser(HTMLParser):
         elif tag in {"script", "iframe", "frame", "img", "source"} and values.get("src"):
             self.links.append((tag, values["src"]))
         elif tag == "form":
+            # Malformed nested forms are not valid HTML; preserve the previous
+            # surface rather than silently dropping it.
+            self._finish_form()
             self._form = FormSurface(
                 action=values.get("action", ""),
                 method=(values.get("method") or "GET").upper(),
-                enctype=values.get("enctype") or "application/x-www-form-urlencoded",
+                enctype=(values.get("enctype") or "application/x-www-form-urlencoded").lower(),
             )
         elif tag in {"input", "textarea", "select"} and self._form is not None:
             name = values.get("name", "").strip()
             if not name:
                 return
-            field_type = values.get("type") or tag
-            value = "" if field_type.lower() == "password" else values.get("value", "")
+            field_type = (values.get("type") or tag).lower()
+            value = "" if field_type == "password" else values.get("value", "")
             self._form.fields.append(
                 FormField(
                     name=name,
-                    field_type=field_type.lower(),
+                    field_type=field_type,
                     value=value,
                     required="required" in values,
                 )
             )
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "form" and self._form is not None:
-            self.forms.append(self._form)
-            self._form = None
+        if tag.lower() == "form":
+            self._finish_form()
+
+    def close(self) -> None:
+        try:
+            HTMLParser.close(self)
+        finally:
+            self._finish_form()
 
 
 _JS_URL_PATTERNS = [
@@ -110,6 +123,16 @@ class CrawlerEngine:
         self.context = context
         self.workspace = workspace
         self.config = config or CrawlConfig()
+        if self.config.max_depth < 0:
+            raise ValueError("Crawler max_depth cannot be negative")
+        if self.config.max_pages < 1:
+            raise ValueError("Crawler max_pages must be positive")
+        if self.config.max_links_per_page < 1:
+            raise ValueError("Crawler max_links_per_page must be positive")
+        if self.config.max_body_bytes < 4096:
+            raise ValueError("Crawler max_body_bytes must be at least 4096")
+        if self.config.timeout is not None and float(self.config.timeout) <= 0:
+            raise ValueError("Crawler timeout must be positive")
         self.passive = passive or PassivePipeline()
         self.default_headers = dict(default_headers or {})
         self.default_headers.setdefault("User-Agent", self.config.user_agent)
@@ -143,7 +166,7 @@ class CrawlerEngine:
         action = self._in_scope_url(page_url, form.action or page_url)
         if not action:
             return None
-        method = form.method if form.method in {"GET", "POST"} else "GET"
+        method = (form.method or "GET").upper()
         fields = [(field.name, field.value) for field in form.fields]
         points = [
             InsertionPoint(
@@ -160,15 +183,29 @@ class CrawlerEngine:
         body: Any = None
         content_type: Optional[str] = None
         request_url = action
+        wire_body_synthesized = False
         if method == "GET" and fields:
             parsed = urlsplit(action)
             query = list(parse_qsl(parsed.query, keep_blank_values=True)) + fields
             request_url = urlunsplit(
                 (parsed.scheme, parsed.netloc, parsed.path, urlencode(query), "")
             )
-        elif method == "POST":
-            body = urlencode(fields)
-            content_type = form.enctype or "application/x-www-form-urlencoded"
+        elif method != "GET":
+            content_type = (form.enctype or "application/x-www-form-urlencoded").lower()
+            if content_type == "application/x-www-form-urlencoded":
+                body = urlencode(fields)
+                wire_body_synthesized = True
+            elif content_type == "text/plain":
+                body = "\r\n".join("%s=%s" % (name, value) for name, value in fields)
+                wire_body_synthesized = True
+            else:
+                # Multipart boundary/body construction is browser-specific. Keep
+                # structured fields instead of fabricating invalid wire bytes.
+                body = {name: value for name, value in fields}
+
+        tags = ["form", "not-submitted"]
+        if method not in {"GET", "HEAD", "OPTIONS"}:
+            tags.append("state-changing-method")
         request = RequestRecord.build(
             method,
             request_url,
@@ -176,10 +213,12 @@ class CrawlerEngine:
             content_type=content_type,
             source="html-form",
             insertion_points=points,
-            tags=["form", "not-submitted"],
+            tags=tags,
             metadata={
                 "page_url": page_url,
                 "has_password_field": any(field.field_type == "password" for field in form.fields),
+                "wire_body_synthesized": wire_body_synthesized,
+                "submitted": False,
             },
         )
         self.workspace.add_request(request)
@@ -204,6 +243,8 @@ class CrawlerEngine:
 
     def crawl(self, start_url: str) -> Dict[str, Any]:
         start = canonical_url(start_url)
+        if not self.context.scope.check_url(start).allowed:
+            raise ValueError("Crawler start URL is outside configured scope")
         queue: Deque[Tuple[str, int, Optional[str], str]] = deque()
         queue.append((start, 0, None, "seed"))
         queued: Set[str] = {
@@ -217,13 +258,13 @@ class CrawlerEngine:
         discovered_links = 0
         started = time.monotonic()
 
-        while queue and pages < max(1, int(self.config.max_pages)):
+        while queue and pages < self.config.max_pages:
             url, depth, parent_url, source = queue.popleft()
             key = self._queue_key(url, self.config.allow_query_variants)
             if key in visited:
                 continue
             visited.add(key)
-            if depth > max(0, int(self.config.max_depth)):
+            if depth > self.config.max_depth:
                 self.workspace.coverage.skip_request("crawl-depth")
                 continue
 
@@ -260,7 +301,7 @@ class CrawlerEngine:
                 continue
 
             response = outcome.response
-            raw_body = response.content[: max(0, int(self.config.max_body_bytes))]
+            raw_body = response.content[: self.config.max_body_bytes]
             response_record = ResponseRecord.build(
                 request.id,
                 response.url or url,
@@ -303,13 +344,19 @@ class CrawlerEngine:
                 parser = _SurfaceParser()
                 try:
                     parser.feed(text)
+                    parser.close()
                 except Exception:
-                    parser = _SurfaceParser()
+                    # Keep any successfully parsed surfaces accumulated before
+                    # malformed markup triggered an exception.
+                    try:
+                        parser.close()
+                    except Exception:
+                        pass
                 for form in parser.forms:
                     if self._record_form(response_record.url, form) is not None:
                         discovered_forms += 1
 
-                for tag, raw_link in parser.links[: max(1, int(self.config.max_links_per_page))]:
+                for tag, raw_link in parser.links[: self.config.max_links_per_page]:
                     candidate = self._in_scope_url(response_record.url, raw_link)
                     if not candidate:
                         scope_skips += 1
@@ -338,7 +385,7 @@ class CrawlerEngine:
         return {
             "pages_observed": pages,
             "urls_visited": len(visited),
-            "urls_queued": len(queued),
+            "urls_queued": len(queue),
             "forms_discovered": discovered_forms,
             "links_discovered": discovered_links,
             "scope_skips": scope_skips,
@@ -347,6 +394,7 @@ class CrawlerEngine:
             "limits": {
                 "max_depth": self.config.max_depth,
                 "max_pages": self.config.max_pages,
+                "max_links_per_page": self.config.max_links_per_page,
                 "max_body_bytes": self.config.max_body_bytes,
             },
         }
