@@ -76,6 +76,7 @@ def run_modules(
         key: CircuitBreaker(config.circuit_failure_threshold, config.circuit_cooldown)
         for key in selected_modules
     }
+    abort_event = threading.Event()
 
     def _capture_context():
         current_stdout = sys.stdout
@@ -164,6 +165,9 @@ def run_modules(
             failure_class=failure_class,
         )
 
+        if abort_event.is_set():
+            return result
+
         if evidence_store is not None:
             evidence = evidence_store.persist_module_result(result)
             result.evidence_ids.append(evidence.evidence_id)
@@ -202,6 +206,7 @@ def run_modules(
                 item.data if item.data else ({"error": item.error} if item.error else {})
             )
     except TimeoutError:
+        abort_event.set()
         for future in list(unfinished):
             module_key = future_map[future]
             _, label = module_map[module_key]
