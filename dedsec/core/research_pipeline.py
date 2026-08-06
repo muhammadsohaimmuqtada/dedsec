@@ -192,7 +192,11 @@ class ResearchPipeline:
             if expanded not in specs:
                 specs.append(expanded)
         if specs:
-            importer = OpenAPIImporter(self.context.target_url, scope=self.context.scope)
+            importer = OpenAPIImporter(
+                self.context.target_url,
+                scope=self.context.scope,
+                default_headers=headers,
+            )
             imported = []
             identity_id = getattr(self.context, "identity_id", "identity-anonymous")
             for path in specs:
