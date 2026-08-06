@@ -1,9 +1,10 @@
+import errno
 import unittest
 from unittest.mock import patch
 
 from dedsec.modules import api_schema_scanner, clickjacking_check, cors_check
 from dedsec.modules import csp_analyzer, exposure_checks, http_methods_audit
-from dedsec.modules import js_extraction, open_redirect, rate_limit_check
+from dedsec.modules import js_extraction, open_redirect, port_scan, rate_limit_check
 from dedsec.modules import security_policy_audit, subdomain_enum, vhost_finder
 
 
@@ -148,6 +149,13 @@ class SurfaceModuleTests(unittest.TestCase):
         self.assertGreaterEqual(len(result["candidates"]), 1)
         self.assertTrue(all(item["verified"] is False for item in result["candidates"]))
 
+    @patch("dedsec.modules.vhost_finder.safe_request", return_value=None)
+    @patch("dedsec.modules.vhost_finder.cached_resolve_ipv4", return_value="1.2.3.4")
+    def test_vhost_missing_baseline_is_inconclusive(self, _resolve_ip, _request):
+        result = vhost_finder.run("https://example.com", "example.com")
+        self.assertTrue(result["inconclusive"])
+        self.assertEqual(result["transport_failures"], 1)
+
     @patch("dedsec.modules.api_schema_scanner.safe_request")
     def test_api_schema_scanner_dedupes_extracted_endpoints(self, mock_safe_request):
         mock_safe_request.return_value = FakeResponse(
@@ -175,6 +183,20 @@ class SurfaceModuleTests(unittest.TestCase):
         mock_safe_request.side_effect = side_effect
         result = http_methods_audit.run("https://example.com", "example.com")
         self.assertIn("HTTP TRACE echoes request data (XST-capable behavior)", result["risks"])
+        self.assertFalse(result["inconclusive"])
+
+    @patch("dedsec.modules.http_methods_audit.safe_request", return_value=None)
+    def test_http_methods_audit_transport_failure_is_inconclusive(self, _request):
+        result = http_methods_audit.run("https://example.com", "example.com")
+        self.assertTrue(result["inconclusive"])
+        self.assertEqual(result["transport_failures"], 2)
+        self.assertIn("transport unavailable", result["error"].lower())
+
+    def test_port_state_classifier_preserves_network_semantics(self):
+        self.assertEqual(port_scan._classify_connect_code(0), "open")
+        self.assertEqual(port_scan._classify_connect_code(errno.ECONNREFUSED), "closed")
+        self.assertEqual(port_scan._classify_connect_code(errno.ETIMEDOUT), "filtered")
+        self.assertEqual(port_scan._classify_connect_code(errno.EHOSTUNREACH), "unreachable")
 
     @patch("dedsec.modules.security_policy_audit.safe_request")
     def test_security_policy_audit_security_txt(self, mock_safe_request):
