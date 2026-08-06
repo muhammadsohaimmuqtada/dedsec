@@ -4,7 +4,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -34,10 +34,11 @@ class RequestOutcome:
 
 
 class TransportEngine:
-    """Scoped HTTP transport with exact on-wire budgeting and bounded redirects."""
+    """Scoped HTTP transport with exact budgeting, deadlines, and health feedback."""
 
     RETRYABLE_STATUS = {429, 500, 502, 503, 504}
     RETRYABLE_FAILURES = {"connect_timeout", "read_timeout", "timeout", "connection"}
+    ROOT_HEALTH_FAILURES = {"connect_timeout", "timeout", "connection"}
     REDIRECT_STATUS = {301, 302, 303, 307, 308}
     MAX_REDIRECTS = 5
 
@@ -119,9 +120,15 @@ class TransportEngine:
             return RequestFailure("invalid_url", str(exc))
         return RequestFailure("request", str(exc))
 
-    def _sleep_backoff(self, completed_attempt: int) -> None:
-        if self.backoff > 0:
-            time.sleep(self.backoff * (2 ** max(0, completed_attempt - 1)))
+    def _sleep_backoff(self, completed_attempt: int, deadline: float) -> bool:
+        if self.backoff <= 0:
+            return time.monotonic() < deadline
+        delay = self.backoff * (2 ** max(0, completed_attempt - 1))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(delay, remaining))
+        return time.monotonic() < deadline
 
     def _request_one(
         self,
@@ -134,11 +141,25 @@ class TransportEngine:
         params: Any,
         json_body: Any,
     ) -> RequestOutcome:
+        """Execute one logical request under one total deadline.
+
+        ``timeout`` caps the whole request including retries and backoff. It is
+        not multiplied by the retry count.
+        """
         max_attempts = 1 + (self.retries if method in {"GET", "HEAD"} else 0)
         started = time.monotonic()
+        deadline = started + max(0.001, float(timeout))
         last_failure = None
 
         for attempt in range(1, max_attempts + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return RequestOutcome(
+                    None,
+                    last_failure or RequestFailure("timeout", "logical request deadline exceeded"),
+                    time.monotonic() - started,
+                    attempt - 1,
+                )
             if not self.context.request_budget.consume(1):
                 return RequestOutcome(
                     None,
@@ -150,7 +171,7 @@ class TransportEngine:
                 response = self._session.request(
                     method,
                     url,
-                    timeout=timeout,
+                    timeout=max(0.001, remaining),
                     allow_redirects=False,
                     headers=headers,
                     data=data,
@@ -159,14 +180,20 @@ class TransportEngine:
                     verify=self.verify_tls,
                 )
                 if response.status_code in self.RETRYABLE_STATUS and attempt < max_attempts:
-                    self._sleep_backoff(attempt)
+                    if not self._sleep_backoff(attempt, deadline):
+                        return RequestOutcome(
+                            response,
+                            None,
+                            time.monotonic() - started,
+                            attempt,
+                        )
                     continue
                 return RequestOutcome(response, None, time.monotonic() - started, attempt)
             except Exception as exc:
                 last_failure = self._classify_exception(exc)
                 if last_failure.category in self.RETRYABLE_FAILURES and attempt < max_attempts:
-                    self._sleep_backoff(attempt)
-                    continue
+                    if self._sleep_backoff(attempt, deadline):
+                        continue
                 return RequestOutcome(None, last_failure, time.monotonic() - started, attempt)
 
         return RequestOutcome(
@@ -175,6 +202,37 @@ class TransportEngine:
             time.monotonic() - started,
             max_attempts,
         )
+
+    def _is_root_host(self, url: str) -> bool:
+        return (urlparse(url).hostname or "").lower() == self.context.domain.lower()
+
+    def _health_short_circuit(self, url: str) -> Optional[RequestOutcome]:
+        health = getattr(self.context, "target_health", None)
+        if health is None or not self._is_root_host(url):
+            return None
+        if health.should_short_circuit():
+            snapshot = health.snapshot()
+            return RequestOutcome(
+                None,
+                RequestFailure(
+                    "target_unreachable",
+                    "root target reachability circuit is open after %s consecutive failure(s)"
+                    % snapshot.get("consecutive_failures", 0),
+                ),
+                0.0,
+                0,
+            )
+        return None
+
+    def _record_root_health(self, url: str, outcome: RequestOutcome) -> None:
+        health = getattr(self.context, "target_health", None)
+        if health is None or not self._is_root_host(url):
+            return
+        if outcome.response is not None:
+            health.record_success()
+            return
+        if outcome.failure is not None and outcome.failure.category in self.ROOT_HEALTH_FAILURES:
+            health.record_failure(outcome.failure.category)
 
     def request(
         self,
@@ -201,6 +259,10 @@ class TransportEngine:
                     0,
                 )
 
+        short_circuit = self._health_short_circuit(url)
+        if short_circuit is not None:
+            return short_circuit
+
         key = self._cache_key(
             method_upper,
             url,
@@ -224,6 +286,8 @@ class TransportEngine:
         current_data = data
         current_json = json_body
         final_response = None
+        logical_timeout = max(0.001, float(timeout or self.context.timeout))
+        logical_deadline = started + logical_timeout
 
         for redirect_index in range(self.MAX_REDIRECTS + 1):
             if enforce_scope:
@@ -236,16 +300,35 @@ class TransportEngine:
                         total_attempts,
                     )
 
+            short_circuit = self._health_short_circuit(current_url)
+            if short_circuit is not None:
+                return RequestOutcome(
+                    final_response,
+                    short_circuit.failure,
+                    time.monotonic() - started,
+                    total_attempts,
+                )
+
+            remaining = logical_deadline - time.monotonic()
+            if remaining <= 0:
+                return RequestOutcome(
+                    final_response,
+                    RequestFailure("timeout", "logical request deadline exceeded"),
+                    time.monotonic() - started,
+                    total_attempts,
+                )
+
             outcome = self._request_one(
                 current_method,
                 current_url,
-                timeout=timeout or self.context.timeout,
+                timeout=remaining,
                 headers=headers,
                 data=current_data,
                 params=params if redirect_index == 0 else None,
                 json_body=current_json,
             )
             total_attempts += outcome.attempts
+            self._record_root_health(current_url, outcome)
             if outcome.response is None:
                 return RequestOutcome(
                     None,
