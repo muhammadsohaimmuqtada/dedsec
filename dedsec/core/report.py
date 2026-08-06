@@ -9,7 +9,7 @@ from dedsec.core.contracts import ModuleResult
 from dedsec.core.correlator import FindingsCorrelator
 from dedsec.core.evidence import EvidenceStore, redact_value
 
-REPORT_SCHEMA_VERSION = "2.0"
+REPORT_SCHEMA_VERSION = "2.1"
 
 
 def _utc_now() -> str:
@@ -20,6 +20,8 @@ def _module_summary(module_results: List[ModuleResult]) -> Dict[str, int]:
     counts = {
         "total": len(module_results),
         "successful": 0,
+        "partial": 0,
+        "inconclusive": 0,
         "failed": 0,
         "timed_out": 0,
         "aborted": 0,
@@ -27,6 +29,10 @@ def _module_summary(module_results: List[ModuleResult]) -> Dict[str, int]:
     for item in module_results:
         if item.status == "success":
             counts["successful"] += 1
+        elif item.status == "partial":
+            counts["partial"] += 1
+        elif item.status == "inconclusive":
+            counts["inconclusive"] += 1
         elif item.status == "timeout":
             counts["timed_out"] += 1
         elif item.status == "aborted":
@@ -131,6 +137,8 @@ def generate_report(
     print(
         f"{Colors.GREEN}[+]{Colors.RESET} Status:    "
         f"{report_data['summary']['successful']} success | "
+        f"{report_data['summary']['partial']} partial | "
+        f"{report_data['summary']['inconclusive']} inconclusive | "
         f"{report_data['summary']['failed']} failed | "
         f"{report_data['summary']['timed_out']} timeout | "
         f"{report_data['summary']['aborted']} aborted"
@@ -145,6 +153,12 @@ def generate_report(
         print(
             f"{Colors.GREEN}[+]{Colors.RESET} Target HTTP requests: "
             f"{runtime['target_http_requests_used']} / {runtime.get('target_http_request_budget', 'unbounded')}"
+        )
+    health = runtime.get("target_health", {})
+    if health:
+        print(
+            f"{Colors.GREEN}[+]{Colors.RESET} Target health: "
+            f"{health.get('state', 'unknown')}"
         )
     print(f"{Colors.BOLD}{Colors.CYAN}{'='*60}{Colors.RESET}\n")
 
