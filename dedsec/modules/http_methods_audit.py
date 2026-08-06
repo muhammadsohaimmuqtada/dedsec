@@ -19,6 +19,8 @@ def run(url, domain, timeout=10):
         "observations": [],
         "risks": [],
         "transport_failures": 0,
+        "partial": False,
+        "inconclusive": False,
     }
 
     options_response = safe_request(
@@ -89,6 +91,15 @@ def run(url, domain, timeout=10):
                     "note": "TRACE returned 200 but request echo was not observed; XST is not confirmed.",
                 }
             )
+
+    if results["transport_failures"] == 2:
+        results["inconclusive"] = True
+        results["error"] = "Target HTTP transport unavailable for OPTIONS and TRACE probes"
+        warn("HTTP methods audit is inconclusive because both bounded probes failed at transport level.")
+        return results
+    if results["transport_failures"]:
+        results["partial"] = True
+        results["error"] = "One HTTP methods probe failed at transport level"
 
     if not results["risks"] and not results["observations"]:
         info("HTTP Methods Audit", f"{Colors.GREEN}No supported dangerous-method signal observed.{Colors.RESET}")
