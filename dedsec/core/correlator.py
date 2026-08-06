@@ -1,86 +1,207 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
 from dedsec.core.contracts import ModuleResult
 
 
 class FindingsCorrelator:
-    """
-    Correlates findings across independent modules to construct high-confidence attack surfaces and risk summaries.
-    """
+    """Evidence-first correlation: observations -> hypotheses -> verified findings."""
+
+    _SEVERITY_WEIGHT = {"CRITICAL": 30, "HIGH": 20, "MEDIUM": 10, "LOW": 5, "INFO": 0}
 
     def __init__(self):
-        self.findings = []
+        self.findings: List[Dict[str, Any]] = []
+
+    @staticmethod
+    def _evidence_ids(result: ModuleResult) -> List[str]:
+        return list(result.evidence_ids or [])
+
+    def _verified(
+        self,
+        result: ModuleResult,
+        finding: str,
+        severity: str,
+        details: Dict[str, Any],
+        verification: str,
+    ) -> Dict[str, Any]:
+        return {
+            "source": result.module,
+            "finding": finding,
+            "severity": severity.upper(),
+            "verification": verification,
+            "evidence_ids": self._evidence_ids(result),
+            "details": details,
+        }
+
+    def _hypothesis(
+        self,
+        result: ModuleResult,
+        finding: str,
+        details: Dict[str, Any],
+        reason: str,
+    ) -> Dict[str, Any]:
+        return {
+            "source": result.module,
+            "finding": finding,
+            "reason": reason,
+            "evidence_ids": self._evidence_ids(result),
+            "details": details,
+        }
 
     def correlate(self, module_results: List[ModuleResult]) -> Dict[str, Any]:
-        result_map = {res.module: res.data for res in module_results if res.status == "success" and res.data}
-        
+        result_map = {
+            res.module: res
+            for res in module_results
+            if res.status == "success" and isinstance(res.data, dict)
+        }
+        observations: List[Dict[str, Any]] = []
+        hypotheses: List[Dict[str, Any]] = []
+        verified: List[Dict[str, Any]] = []
+        rejected_or_unverified: List[Dict[str, Any]] = []
+
+        for result in module_results:
+            observations.append(
+                {
+                    "source": result.module,
+                    "status": result.status,
+                    "evidence_ids": self._evidence_ids(result),
+                    "data_keys": sorted(result.data.keys()) if isinstance(result.data, dict) else [],
+                }
+            )
+            if result.status != "success":
+                rejected_or_unverified.append(
+                    {
+                        "source": result.module,
+                        "reason": result.error or result.status,
+                        "evidence_ids": self._evidence_ids(result),
+                    }
+                )
+
+        exposures = result_map.get("exposures")
+        if exposures:
+            for item in exposures.data.get("confirmed", []):
+                if exposures.evidence_ids:
+                    verified.append(
+                        self._verified(
+                            exposures,
+                            item.get("label", "Confirmed exposure"),
+                            item.get("severity", "HIGH"),
+                            item,
+                            item.get("evidence", "module confirmation rule matched"),
+                        )
+                    )
+            for item in exposures.data.get("candidates", []):
+                hypotheses.append(
+                    self._hypothesis(
+                        exposures,
+                        item.get("label", "Exposure candidate"),
+                        item,
+                        "candidate response requires manual validation",
+                    )
+                )
+
+        redirect = result_map.get("redirect")
+        if redirect:
+            for item in redirect.data.get("confirmed", []):
+                if redirect.evidence_ids:
+                    verified.append(
+                        self._verified(
+                            redirect,
+                            "Open redirect via parameter '%s'" % item.get("param", "unknown"),
+                            "HIGH",
+                            item,
+                            "external redirect reproduced while control remained internal",
+                        )
+                    )
+            for item in redirect.data.get("candidates", []):
+                hypotheses.append(
+                    self._hypothesis(
+                        redirect,
+                        "Possible open redirect via '%s'" % item.get("param", "unknown"),
+                        item,
+                        "control behavior did not isolate attacker-controlled redirect",
+                    )
+                )
+
+        subdomains = result_map.get("subdomains")
+        if subdomains:
+            for item in subdomains.data.get("takeovers", []):
+                if item.get("verified") is True and item.get("proof") and subdomains.evidence_ids:
+                    verified.append(
+                        self._verified(
+                            subdomains,
+                            "Verified subdomain takeover on %s" % item.get("url", "unknown"),
+                            "HIGH",
+                            item,
+                            str(item.get("proof")),
+                        )
+                    )
+                else:
+                    hypotheses.append(
+                        self._hypothesis(
+                            subdomains,
+                            "Potential subdomain takeover on %s" % item.get("url", "unknown"),
+                            item,
+                            "provider/DNS fingerprint is not proof of claimability",
+                        )
+                    )
+
+        cors = result_map.get("cors")
+        if cors:
+            for item in cors.data.get("findings", []):
+                if item.get("confirmed") is True and item.get("impact") and cors.evidence_ids:
+                    verified.append(
+                        self._verified(
+                            cors,
+                            item.get("issue", "Confirmed CORS issue"),
+                            item.get("severity", "HIGH"),
+                            item,
+                            str(item.get("impact")),
+                        )
+                    )
+                else:
+                    hypotheses.append(
+                        self._hypothesis(
+                            cors,
+                            item.get("issue", "CORS behavior requiring validation"),
+                            item,
+                            "configuration signal alone is not demonstrated impact",
+                        )
+                    )
+
+        score = min(
+            sum(self._SEVERITY_WEIGHT.get(item["severity"], 0) for item in verified),
+            100,
+        )
+        technology_summary: Dict[str, Any] = {"server": None, "cms": [], "frameworks": []}
+        tech = result_map.get("tech")
+        if tech:
+            technology_summary = {
+                "server": tech.data.get("server"),
+                "cms": [
+                    item.get("name")
+                    for item in tech.data.get("cms", [])
+                    if isinstance(item, dict)
+                ],
+                "frameworks": [
+                    item.get("name")
+                    for item in tech.data.get("js_frameworks", [])
+                    if isinstance(item, dict)
+                ],
+            }
+
         correlated = {
-            "attack_surface_score": 0,
-            "critical_vulnerabilities": [],
-            "high_risks": [],
-            "medium_risks": [],
-            "technology_summary": [],
-            "attack_vectors": []
+            "attack_surface_score": score,
+            "technology_summary": technology_summary,
+            "observations": observations,
+            "hypotheses": hypotheses,
+            "verified_findings": verified,
+            "rejected_or_unverified": rejected_or_unverified,
+            "critical_vulnerabilities": [
+                item for item in verified if item.get("severity") in ("CRITICAL", "HIGH")
+            ],
+            "high_risks": [item for item in verified if item.get("severity") == "HIGH"],
+            "medium_risks": [item for item in verified if item.get("severity") == "MEDIUM"],
+            "attack_vectors": [],
         }
-
-        # 1. Tech Stack Correlation
-        tech_data = result_map.get("tech", {})
-        frameworks = [item.get("name") for item in tech_data.get("js_frameworks", [])]
-        cms = [item.get("name") for item in tech_data.get("cms", [])]
-        server = tech_data.get("server")
-
-        correlated["technology_summary"] = {
-            "server": server,
-            "cms": cms,
-            "frameworks": frameworks
-        }
-
-        # 2. Exposure & Sensitive Path Correlation
-        exposures = result_map.get("exposures", {})
-        confirmed_exposures = exposures.get("confirmed", [])
-        for exp in confirmed_exposures:
-            correlated["critical_vulnerabilities"].append({
-                "source": "exposure_checks",
-                "finding": exp.get("label"),
-                "url": exp.get("url"),
-                "severity": exp.get("severity", "HIGH")
-            })
-            correlated["attack_surface_score"] += 25
-
-        # 3. Subdomain Takeover Correlation
-        subdomains = result_map.get("subdomains", {})
-        takeovers = subdomains.get("takeovers", [])
-        for to in takeovers:
-            correlated["critical_vulnerabilities"].append({
-                "source": "subdomain_enum",
-                "finding": f"Subdomain Takeover on {to.get('url')} ({to.get('provider')})",
-                "severity": "HIGH"
-            })
-            correlated["attack_surface_score"] += 30
-
-        # 4. CORS Hijacking Risk Correlation
-        cors = result_map.get("cors", {})
-        if cors.get("vulnerable"):
-            for f in cors.get("findings", []):
-                if f.get("severity") in ("CRITICAL", "HIGH"):
-                    correlated["critical_vulnerabilities"].append({
-                        "source": "cors_check",
-                        "finding": f.get("issue"),
-                        "severity": f.get("severity")
-                    })
-                    correlated["attack_surface_score"] += 20
-
-        # 5. Open Redirect & Chain Risk Correlation
-        redirects = result_map.get("redirect", {})
-        confirmed_redirects = redirects.get("confirmed", [])
-        for red in confirmed_redirects:
-            correlated["high_risks"].append({
-                "source": "open_redirect",
-                "finding": f"Open Redirect via parameter '{red.get('param')}'",
-                "severity": "HIGH"
-            })
-            correlated["attack_surface_score"] += 15
-
-        # Cap attack surface score at 100
-        correlated["attack_surface_score"] = min(correlated["attack_surface_score"], 100)
-
+        self.findings = verified
         return correlated
