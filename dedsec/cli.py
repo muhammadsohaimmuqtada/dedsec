@@ -9,6 +9,8 @@ from rich.text import Text
 from dedsec import __version__
 from dedsec.core.banner import print_banner
 from dedsec.core.contracts import ScanConfig
+from dedsec.core.correlator import FindingsCorrelator
+from dedsec.core.evidence import EvidenceStore
 from dedsec.core.orchestrator import PerThreadCapture, run_modules
 from dedsec.core.report import generate_report
 from dedsec.core.utils import configure_http_session, error, normalize_target
@@ -65,12 +67,15 @@ MARKET_PROFILE_MODULES = [
     "security_policy",
 ]
 
+
 def _validate_modules(modules: List[str]):
     normalized = []
     for module in modules:
         key = module.strip().lower()
         if key not in MODULE_MAP and key != "all":
-            raise typer.BadParameter(f"Unknown module '{module}'. Valid values: all, {', '.join(MODULE_MAP.keys())}")
+            raise typer.BadParameter(
+                f"Unknown module '{module}'. Valid values: all, {', '.join(MODULE_MAP.keys())}"
+            )
         normalized.append(key)
     return normalized
 
@@ -83,17 +88,42 @@ def _version_callback(value: bool):
 
 def scan(
     url: str = typer.Argument(..., help="Target URL (e.g., https://example.com)"),
-    modules: str = typer.Option("all", "--modules", "-m", help="Modules to run (comma-separated or legacy space-separated)"),
+    modules: str = typer.Option(
+        "all", "--modules", "-m", help="Modules to run (comma-separated or legacy space-separated)"
+    ),
     legacy_modules: Optional[List[str]] = typer.Argument(None, hidden=True),
     timeout: int = typer.Option(10, "--timeout", min=1, help="Request timeout in seconds"),
-    concurrency: int = typer.Option(5, "--concurrency", min=1, help="Bounded parallel module concurrency"),
-    threads: Optional[int] = typer.Option(None, "--threads", min=1, help="Deprecated alias for --concurrency"),
-    module_timeout: Optional[int] = typer.Option(None, "--module-timeout", min=1, help="Per-module timeout in seconds"),
-    global_timeout: Optional[int] = typer.Option(None, "--global-timeout", min=1, help="Global scan timeout in seconds"),
-    retries: int = typer.Option(3, "--retries", min=0, help="HTTP retries with exponential backoff"),
-    backoff: float = typer.Option(0.5, "--backoff", min=0.0, help="HTTP retry backoff factor"),
-    output: Optional[str] = typer.Option(None, "--output", help="Save report to file (JSON)"),
-    json_output: bool = typer.Option(False, "--json", help="Output results as JSON"),
+    concurrency: int = typer.Option(
+        5, "--concurrency", min=1, help="Bounded parallel module concurrency"
+    ),
+    threads: Optional[int] = typer.Option(
+        None, "--threads", min=1, help="Deprecated alias for --concurrency"
+    ),
+    module_timeout: Optional[int] = typer.Option(
+        None, "--module-timeout", min=1, help="Per-module timeout in seconds"
+    ),
+    global_timeout: Optional[int] = typer.Option(
+        None, "--global-timeout", min=1, help="Global scan timeout in seconds"
+    ),
+    retries: int = typer.Option(
+        3, "--retries", min=0, help="HTTP retries with exponential backoff"
+    ),
+    module_retries: int = typer.Option(
+        1,
+        "--module-retries",
+        min=0,
+        help="Retry whole modules only after transient/timeout failures",
+    ),
+    backoff: float = typer.Option(
+        0.5, "--backoff", min=0.0, help="HTTP/module retry backoff factor"
+    ),
+    output: Optional[str] = typer.Option(None, "--output", help="Save v2 report to file (JSON)"),
+    evidence_dir: Optional[str] = typer.Option(
+        None,
+        "--evidence-dir",
+        help="Persist redacted per-module evidence artifacts to this directory",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output v2 report as JSON"),
     market: bool = typer.Option(False, "--market", help="Run curated market-ready recon profile"),
     version: Optional[bool] = typer.Option(
         None,
@@ -123,8 +153,12 @@ def scan(
         raise typer.Exit(code=1)
 
     modules_str = modules or "all"
-    module_tokens = [token.strip() for token in modules_str.replace(",", " ").split() if token.strip()]
-    module_tokens.extend(token.strip() for token in (legacy_modules or []) if token and token.strip())
+    module_tokens = [
+        token.strip() for token in modules_str.replace(",", " ").split() if token.strip()
+    ]
+    module_tokens.extend(
+        token.strip() for token in (legacy_modules or []) if token and token.strip()
+    )
     module_args = _validate_modules(module_tokens or ["all"])
     if market:
         selected = MARKET_PROFILE_MODULES
@@ -140,7 +174,10 @@ def scan(
         backoff=backoff,
         pool_connections=max(concurrency * 4, 10),
         pool_maxsize=max(concurrency * 8, 20),
+        module_retries=module_retries,
+        evidence_dir=evidence_dir,
     )
+    evidence_store = EvidenceStore(artifact_dir=evidence_dir)
 
     info_table = Table(show_header=False, title="Scan Configuration")
     info_table.add_column("key", style="cyan", no_wrap=True)
@@ -150,33 +187,35 @@ def scan(
     info_table.add_row("Modules", ", ".join(selected))
     info_table.add_row("Timeout", f"{timeout}s")
     info_table.add_row("Concurrency", str(min(config.concurrency, len(selected))))
+    info_table.add_row("Module retries", str(module_retries))
+    info_table.add_row("Scan ID", evidence_store.scan_id)
     if module_timeout:
         info_table.add_row("Module timeout", f"{module_timeout}s")
     if global_timeout:
         info_table.add_row("Global timeout", f"{global_timeout}s")
+    if evidence_dir:
+        info_table.add_row("Evidence dir", evidence_dir)
     console.print(info_table)
 
     capture = PerThreadCapture(sys.stdout)
     sys.stdout = capture
-
     status_rows = {}
 
     def _on_update(module_result):
-        if module_result.status == "running":
-            status_rows[module_result.module] = "running"
-        else:
-            status_rows[module_result.module] = module_result.status
+        status_rows[module_result.module] = module_result.status
 
-    results, module_results = run_modules(
-        selected_modules=selected,
-        module_map=MODULE_MAP,
-        url=normalized_url,
-        domain=domain,
-        config=config,
-        on_update=_on_update,
-    )
-
-    sys.stdout = capture._real
+    try:
+        results, module_results = run_modules(
+            selected_modules=selected,
+            module_map=MODULE_MAP,
+            url=normalized_url,
+            domain=domain,
+            config=config,
+            on_update=_on_update,
+            evidence_store=evidence_store,
+        )
+    finally:
+        sys.stdout = capture._real
 
     for item in module_results:
         if item.output:
@@ -185,6 +224,7 @@ def scan(
     summary = Table(title="Module Status Summary")
     summary.add_column("Module", style="cyan", no_wrap=True)
     summary.add_column("Status", no_wrap=True)
+    summary.add_column("Attempts", justify="right")
     summary.add_column("Duration (s)", justify="right")
     for item in module_results:
         status_style = {
@@ -193,9 +233,15 @@ def scan(
             "timeout": "yellow",
             "running": "cyan",
         }.get(item.status, "white")
-        summary.add_row(item.module, Text(item.status.upper(), style=status_style), f"{item.duration:.2f}")
+        summary.add_row(
+            item.module,
+            Text(item.status.upper(), style=status_style),
+            str(item.attempts),
+            f"{item.duration:.2f}",
+        )
     console.print(summary)
 
+    correlated = FindingsCorrelator().correlate(module_results)
     generate_report(
         normalized_url,
         domain,
@@ -203,6 +249,8 @@ def scan(
         json_output=json_output,
         output_file=output,
         module_results=module_results,
+        evidence_store=evidence_store,
+        correlated=correlated,
     )
 
 
