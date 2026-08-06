@@ -1,10 +1,9 @@
 import importlib
-from typing import Dict, Any, List
+from typing import Dict
+
 
 class PluginManager:
-    """
-    Dynamically loads and registers custom DEDSEC modules at runtime.
-    """
+    """Dynamically load and register custom DEDSEC modules at runtime."""
 
     def __init__(self):
         self.plugins = {}
