@@ -1,77 +1,72 @@
 # Security Policy
 
-DEDSEC is security software, so vulnerabilities in the tool itself should be handled through coordinated disclosure. Please do **not** publish exploit details, credentials, private scan artifacts, or sensitive target data in a public issue.
+DEDSEC is security tooling. Vulnerabilities in the tool itself can affect scan scope, confidentiality, evidence integrity, or the safety of authorized testing. Please report those issues responsibly.
 
-## Supported versions
-
-Security fixes are provided for the current release line.
+## Supported Versions
 
 | Version | Supported |
 | --- | --- |
-| `1.2.x` | Yes |
-| `<= 1.1.x` | No |
+| `1.3.x` | ✅ Current |
+| `1.2.x` | ⚠️ Upgrade recommended |
+| `<= 1.1.x` | ❌ No longer supported |
 
-Users should reproduce security issues against the latest available release or the current `main` branch when practical.
+Security fixes are prioritized for the current release line. Users should reproduce issues against the latest release or current `main` when practical.
 
-## What should be reported privately
+## What Counts as a DEDSEC Security Issue
 
 Examples include:
 
-- command or argument handling that can cause unintended code execution;
-- scope-policy or transport behavior that can send requests outside the intended target boundary;
-- secret-redaction failures that expose credentials or sensitive evidence;
-- unsafe temporary-file or report-writing behavior;
-- dependency or packaging behavior that creates a concrete security impact;
-- denial-of-service conditions that can be triggered through normal DEDSEC usage;
-- CI/release weaknesses that could compromise distributed project artifacts.
+- target-scope or redirect-scope bypass;
+- failure of hard scan/module cancellation that can leave unintended network activity running;
+- secret or credential leakage in reports, evidence, logs, or artifacts;
+- unsafe TLS behavior or automatic certificate-verification bypass;
+- command, path, template, or other injection in DEDSEC itself;
+- request-budget or network-boundary enforcement failures;
+- evidence tampering, report-integrity failures, or unsafe artifact handling;
+- dependency vulnerabilities that materially affect DEDSEC's security behavior.
 
-A false positive in a detector, feature request, documentation issue, or ordinary scanner bug can normally be reported through the public issue tracker unless it contains sensitive target information.
+A vulnerability found **with DEDSEC against somebody else's system** is not a DEDSEC vulnerability. Report that issue through the affected system owner's authorized disclosure or bug-bounty process.
 
-## How to report a vulnerability
+## Reporting a Vulnerability
 
-**Preferred:** use GitHub's private vulnerability reporting / Security Advisory flow for this repository when the **Report a vulnerability** option is available under the repository's Security tab.
+Please do not publish sensitive exploit details, credentials, private target data, or zero-day information in a public GitHub issue.
 
-If private vulnerability reporting is unavailable, contact the repository maintainer through a private contact method listed on the maintainer's GitHub profile before sending technical details. Do not fall back to a public issue containing proof-of-concept code or sensitive evidence.
+Use GitHub's private security-reporting mechanism when it is available for this repository. If private reporting is unavailable, contact the maintainer through an established private channel before publishing technical details.
 
-Please include, when available:
+A useful report should include:
 
-- affected DEDSEC version or commit;
+- affected DEDSEC version and commit;
 - operating system and Python version;
-- affected component/module;
-- concise impact description;
-- reproduction steps using a local, synthetic, or otherwise authorized target;
-- minimal proof of concept;
-- suggested mitigation, if known.
+- exact command/configuration needed to reproduce the issue;
+- expected vs. observed behavior;
+- minimal proof of impact using synthetic or owned test data;
+- relevant stack trace or logs with secrets removed;
+- whether the issue affects scope, request budgets, TLS, evidence, reporting, or execution boundaries.
 
-Redact credentials, access tokens, cookies, private hostnames, and unrelated customer data.
+## Response Targets
 
-## Response targets
+These are project targets, not contractual SLAs:
 
-For a well-formed private report, the project aims to:
+| Stage | Target |
+| --- | --- |
+| Acknowledge report | 3 business days |
+| Initial severity / reproducibility review | 7 business days |
+| Remediation plan for confirmed high-impact issues | 14 business days |
+| Coordinated disclosure | Agreed with reporter based on fix availability |
 
-- acknowledge receipt within **3 business days**;
-- provide an initial triage decision within **7 business days**;
-- coordinate remediation and disclosure timing based on severity and complexity.
+## Safe Research Expectations
 
-These are response targets, not contractual service-level guarantees. Complex issues may require additional time.
+When testing DEDSEC itself:
 
-## Coordinated disclosure
-
-Please allow maintainers reasonable time to reproduce, fix, test, and release a remediation before public disclosure. When a report is confirmed, the project may publish a GitHub Security Advisory describing affected versions, impact, remediation, and reporter credit if the reporter wishes to be named.
-
-DEDSEC does not currently promise monetary bug bounties or rewards.
-
-## Security research expectations
-
-Testing DEDSEC itself should use infrastructure you own or are authorized to use. A project vulnerability report does not grant permission to test unrelated third-party systems.
-
-When demonstrating scanner issues:
-
-- prefer local fixtures, mock services, or disposable lab targets;
+- use systems you own or are explicitly authorized to test;
+- prefer local fixtures and synthetic credentials;
 - keep request volume bounded;
-- avoid destructive payloads;
-- do not include third-party credentials or production data.
+- do not use destructive payloads, denial-of-service techniques, social engineering, or persistence;
+- do not access or retain third-party data;
+- stop testing if behavior escapes the intended scope.
 
-## Vulnerabilities discovered by DEDSEC
+DEDSEC's built-in guardrails reduce accidental unsafe behavior, but they do not replace authorization or operator judgment. The target HTTP request budget does not represent DNS queries, WHOIS, or raw TCP operations; those operations are bounded separately by module/global execution deadlines and module-specific controls.
 
-This policy covers vulnerabilities **in DEDSEC**. Security findings discovered against another organization should be reported through that organization's authorized disclosure or bug-bounty process and handled according to its scope and rules.
+## Disclosure and Credit
+
+We aim to coordinate fixes and disclosure with good-faith reporters. With the reporter's permission, meaningful security contributions may be credited in release notes or advisories.
