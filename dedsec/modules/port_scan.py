@@ -1,3 +1,4 @@
+import errno
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -26,15 +27,38 @@ REVIEW_PORTS = {
     9200, 9300, 11211, 15672, 27017,
 }
 HTTP_PORTS = {80, 443, 5000, 8080, 8443, 8888}
+FILTERED_CONNECT_CODES = {errno.ETIMEDOUT}
+for _errno_name in ("EAGAIN", "EWOULDBLOCK", "EINPROGRESS", "EALREADY"):
+    _errno_value = getattr(errno, _errno_name, None)
+    if _errno_value is not None:
+        FILTERED_CONNECT_CODES.add(_errno_value)
+
+
+def _classify_connect_code(code):
+    if code == 0:
+        return "open"
+    if code == errno.ECONNREFUSED:
+        return "closed"
+    if code in FILTERED_CONNECT_CODES:
+        return "filtered"
+    if code in {errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EHOSTDOWN}:
+        return "unreachable"
+    return "error"
 
 
 def _scan_port(host, port, service, timeout):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(min(float(timeout), 3.0))
-            return port, service, sock.connect_ex((host, port)) == 0
+            code = sock.connect_ex((host, port))
+            return port, service, _classify_connect_code(code), code
+    except socket.timeout:
+        return port, service, "filtered", errno.ETIMEDOUT
+    except OSError as exc:
+        code = exc.errno or -1
+        return port, service, _classify_connect_code(code), code
     except Exception:
-        return port, service, False
+        return port, service, "error", -1
 
 
 def _grab_banner(host, port, timeout=2):
@@ -66,11 +90,31 @@ def _http_fingerprint(host, port, timeout):
     }
 
 
+def _entries(items):
+    return [
+        {"port": port, "service": service, "socket_code": code}
+        for port, service, code in sorted(items)
+    ]
+
+
 def run(url, domain, timeout=10):
     section("Port Exposure Scan", "📡")
-    results = {"open": [], "closed": [], "summary": "", "observations": []}
-    open_ports = []
-    closed_ports = []
+    results = {
+        "open": [],
+        "closed": [],
+        "filtered": [],
+        "unreachable": [],
+        "errors": [],
+        "summary": "",
+        "observations": [],
+    }
+    states = {
+        "open": [],
+        "closed": [],
+        "filtered": [],
+        "unreachable": [],
+        "error": [],
+    }
 
     print(f"  Scanning {len(TOP_PORTS)} bounded TCP ports on {domain}...")
     with ThreadPoolExecutor(max_workers=min(32, len(TOP_PORTS))) as executor:
@@ -79,11 +123,10 @@ def run(url, domain, timeout=10):
             for port, service in TOP_PORTS
         ]
         for future in as_completed(futures):
-            port, service, is_open = future.result()
-            (open_ports if is_open else closed_ports).append((port, service))
+            port, service, state, code = future.result()
+            states[state].append((port, service, code))
 
-    open_ports.sort()
-    closed_ports.sort()
+    open_ports = sorted((port, service) for port, service, _ in states["open"])
     banners = {}
     http_headers = {}
 
@@ -105,9 +148,15 @@ def run(url, domain, timeout=10):
         print(f"\n{Colors.GREEN}[+]{Colors.RESET} {Colors.BOLD}Open Ports:{Colors.RESET}")
         for port, service in open_ports:
             review = f"  {Colors.YELLOW}review exposure{Colors.RESET}" if port in REVIEW_PORTS else ""
-            print(f"    {Colors.GREEN}●{Colors.RESET}  {Colors.BOLD}{port:5}{Colors.RESET}  {Colors.CYAN}{service:<18}{Colors.RESET}{review}")
+            print(
+                f"    {Colors.GREEN}●{Colors.RESET}  {Colors.BOLD}{port:5}{Colors.RESET}  "
+                f"{Colors.CYAN}{service:<18}{Colors.RESET}{review}"
+            )
             if port in banners:
-                print(f"           {Colors.DIM}Banner: {banners[port].replace(chr(10), ' ')[:120]}{Colors.RESET}")
+                print(
+                    f"           {Colors.DIM}Banner: "
+                    f"{banners[port].replace(chr(10), ' ')[:120]}{Colors.RESET}"
+                )
             for key, value in http_headers.get(port, {}).items():
                 print(f"           {Colors.DIM}{key}: {value}{Colors.RESET}")
             if port in REVIEW_PORTS:
@@ -116,7 +165,10 @@ def run(url, domain, timeout=10):
                         "port": port,
                         "service": service,
                         "classification": "exposure-review",
-                        "note": "Open service requires context-specific access-control/version review; port number alone is not a vulnerability.",
+                        "note": (
+                            "Open service requires context-specific access-control/version review; "
+                            "port number alone is not a vulnerability."
+                        ),
                     }
                 )
 
@@ -129,7 +181,15 @@ def run(url, domain, timeout=10):
         }
         for port, service in open_ports
     ]
-    results["closed"] = [{"port": port, "service": service} for port, service in closed_ports]
-    results["summary"] = f"{len(open_ports)} open / {len(closed_ports)} closed out of {len(TOP_PORTS)} scanned"
+    results["closed"] = _entries(states["closed"])
+    results["filtered"] = _entries(states["filtered"])
+    results["unreachable"] = _entries(states["unreachable"])
+    results["errors"] = _entries(states["error"])
+
+    results["summary"] = (
+        f"{len(states['open'])} open / {len(states['closed'])} closed / "
+        f"{len(states['filtered'])} filtered-timeout / {len(states['unreachable'])} unreachable / "
+        f"{len(states['error'])} error out of {len(TOP_PORTS)} scanned"
+    )
     info("Summary", results["summary"])
     return results

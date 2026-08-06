@@ -1,6 +1,7 @@
 from urllib.parse import urljoin
-from dedsec.core.utils import safe_request, section, info, warn, error
+
 from dedsec.core.colors import Colors
+from dedsec.core.utils import info, safe_request, section, warn
 
 SITEMAP_PATHS = [
     "/sitemap.xml",
@@ -24,18 +25,14 @@ def run(url, domain, timeout=10):
         lines = resp.text.splitlines()
         disallowed = []
         sitemaps_from_robots = []
-        current_agent = "*"
 
         for line in lines:
             line = line.strip()
-            if line.lower().startswith("user-agent:"):
-                current_agent = line.split(":", 1)[1].strip()
-            elif line.lower().startswith("disallow:"):
+            if line.lower().startswith("disallow:"):
                 path = line.split(":", 1)[1].strip()
                 if path:
                     disallowed.append(path)
             elif line.lower().startswith("sitemap:"):
-                # Use split with maxsplit=1 then re-join to preserve URL scheme (e.g., https://)
                 sm = line[len("sitemap:"):].strip()
                 sitemaps_from_robots.append(sm)
 
@@ -69,7 +66,6 @@ def run(url, domain, timeout=10):
         if r and r.status_code == 200:
             size = len(r.content)
             print(f"  {Colors.GREEN}✔{Colors.RESET}  {sm_url} — {size} bytes")
-            # Count URLs in sitemap
             url_count = r.text.count("<url>") + r.text.count("<sitemap>")
             found_sitemaps[sm_url] = {"size": size, "entries": url_count}
         else:

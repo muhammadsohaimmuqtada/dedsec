@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dedsec"
-version = "1.3.0"
+version = "1.3.1"
 description = "Evidence-driven web reconnaissance framework for authorized security testing"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -57,15 +57,3 @@ dev = [
 [tool.black]
 line-length = 100
 target-version = ["py38"]
-
-[tool.ruff]
-line-length = 100
-target-version = "py38"
-
-[tool.ruff.lint]
-select = ["E", "F", "I"]
-ignore = ["E501", "F401", "F841", "I001"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-q"

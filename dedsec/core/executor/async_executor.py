@@ -3,8 +3,9 @@ import importlib
 import io
 import sys
 import time
-from typing import Dict, Tuple, List, Callable, Optional
-from dedsec.core.contracts import ScanConfig, ModuleResult
+
+from dedsec.core.contracts import ModuleResult, ScanConfig
+
 
 async def run_module_async(
     module_key: str,

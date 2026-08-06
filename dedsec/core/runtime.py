@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from dedsec.core.evidence import EvidenceStore
+from dedsec.core.health import TargetHealth
 from dedsec.core.scope import ScopePolicy
 
 
@@ -82,9 +83,14 @@ class ScanContext:
     evidence: EvidenceStore
     timeout: int = 10
     request_budget: RequestBudget = field(default_factory=RequestBudget)
+    target_health: Optional[TargetHealth] = None
     metadata: Dict[str, str] = field(default_factory=dict)
     _transport: Any = field(default=None, init=False, repr=False)
     _transport_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+
+    def __post_init__(self):
+        if self.target_health is None:
+            self.target_health = TargetHealth(self.domain)
 
     def get_transport(
         self,
@@ -123,6 +129,8 @@ class ScanContext:
         evidence_dir: Optional[str] = None,
         max_requests: Optional[int] = 1000,
         include_subdomains: bool = True,
+        health_failure_threshold: int = 2,
+        health_cooldown_seconds: float = 15.0,
     ) -> "ScanContext":
         evidence = EvidenceStore(artifact_dir=evidence_dir)
         scope = ScopePolicy.from_root(domain, include_subdomains=include_subdomains)
@@ -134,4 +142,9 @@ class ScanContext:
             evidence=evidence,
             timeout=timeout,
             request_budget=RequestBudget(max_requests=max_requests),
+            target_health=TargetHealth(
+                domain,
+                failure_threshold=health_failure_threshold,
+                cooldown_seconds=health_cooldown_seconds,
+            ),
         )

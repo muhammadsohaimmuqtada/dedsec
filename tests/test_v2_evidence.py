@@ -206,10 +206,40 @@ class EvidenceV2Tests(unittest.TestCase):
             [failed],
             store,
         )
-        self.assertEqual(report["schema_version"], "2.0")
+        self.assertEqual(report["schema_version"], "2.1")
         self.assertEqual(report["summary"]["failed"], 1)
+        self.assertEqual(report["summary"]["partial"], 0)
+        self.assertEqual(report["summary"]["inconclusive"], 0)
         self.assertEqual(report["analysis"]["rejected_or_unverified"][0]["source"], "dns")
         self.assertNotIn("secret", json.dumps(report).lower())
+
+    def test_report_counts_partial_and_inconclusive_separately(self):
+        results = [
+            ModuleResult(
+                module="hosting",
+                label="Hosting",
+                status="partial",
+                duration=0.1,
+                error="target HTTP unavailable",
+                data={"provider": "Example"},
+            ),
+            ModuleResult(
+                module="headers",
+                label="Headers",
+                status="inconclusive",
+                duration=0.0,
+                error="target unreachable",
+            ),
+        ]
+        report = build_report(
+            "https://example.com",
+            "example.com",
+            {"hosting": {"provider": "Example"}, "headers": {"error": "target unreachable"}},
+            results,
+        )
+        self.assertEqual(report["summary"]["partial"], 1)
+        self.assertEqual(report["summary"]["inconclusive"], 1)
+        self.assertEqual(report["summary"]["failed"], 0)
 
 
 if __name__ == "__main__":

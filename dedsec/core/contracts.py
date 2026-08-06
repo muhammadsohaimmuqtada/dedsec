@@ -55,6 +55,9 @@ class ModuleResult:
 class ModuleSummary:
     total: int
     successful: int
-    failed: int
-    timed_out: int
-    duration: float
+    partial: int = 0
+    inconclusive: int = 0
+    failed: int = 0
+    timed_out: int = 0
+    aborted: int = 0
+    duration: float = 0.0

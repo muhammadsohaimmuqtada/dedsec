@@ -11,6 +11,7 @@ from dedsec import __version__
 from dedsec.core.banner import print_banner
 from dedsec.core.contracts import ScanConfig
 from dedsec.core.correlator import FindingsCorrelator
+from dedsec.core.health import probe_target_connectivity
 from dedsec.core.orchestrator import PerThreadCapture, run_modules
 from dedsec.core.report import generate_report
 from dedsec.core.runtime import ScanContext
@@ -75,7 +76,12 @@ def scan(
         "all", "--modules", "-m", help="Modules to run (comma-separated or legacy space-separated)"
     ),
     legacy_modules: Optional[List[str]] = typer.Argument(None, hidden=True),
-    timeout: int = typer.Option(10, "--timeout", min=1, help="Per-request timeout in seconds"),
+    timeout: int = typer.Option(
+        10,
+        "--timeout",
+        min=1,
+        help="Total logical HTTP request deadline in seconds, including retries/backoff",
+    ),
     concurrency: int = typer.Option(5, "--concurrency", min=1, help="Maximum concurrent module processes"),
     threads: Optional[int] = typer.Option(None, "--threads", min=1, help="Deprecated alias for --concurrency"),
     module_timeout: int = typer.Option(
@@ -84,7 +90,12 @@ def scan(
     global_timeout: int = typer.Option(
         600, "--global-timeout", min=1, help="Hard overall scan deadline in seconds"
     ),
-    retries: int = typer.Option(3, "--retries", min=0, help="Bounded HTTP retries for idempotent requests"),
+    retries: int = typer.Option(
+        3,
+        "--retries",
+        min=0,
+        help="HTTP retries inside the total logical request deadline",
+    ),
     module_retries: int = typer.Option(
         1, "--module-retries", min=0, help="Retry whole modules after classified transient failure"
     ),
@@ -93,6 +104,17 @@ def scan(
         1000, "--max-requests", min=1, help="Shared target HTTP request budget"
     ),
     root_only: bool = typer.Option(False, "--root-only", help="Restrict target HTTP traffic to the root host"),
+    preflight_timeout: float = typer.Option(
+        3.0,
+        "--preflight-timeout",
+        min=0.1,
+        help="TCP reachability timeout for each of two root-target preflight attempts",
+    ),
+    skip_preflight: bool = typer.Option(
+        False,
+        "--skip-preflight",
+        help="Skip the bounded root-target TCP preflight",
+    ),
     output: Optional[str] = typer.Option(None, "--output", help="Save v2 report to JSON file"),
     evidence_dir: Optional[str] = typer.Option(
         None, "--evidence-dir", help="Persist redacted per-module evidence artifacts"
@@ -157,13 +179,29 @@ def scan(
     )
     evidence_store = scan_context.evidence
 
+    if skip_preflight:
+        preflight = {
+            "skipped": True,
+            "host": domain,
+            "tcp": "not_checked",
+            "attempts": 0,
+        }
+    else:
+        preflight = probe_target_connectivity(
+            normalized_url,
+            health=scan_context.target_health,
+            timeout=min(float(timeout), float(preflight_timeout)),
+            attempts=2,
+        )
+        preflight["skipped"] = False
+
     info_table = Table(show_header=False, title="Scan Configuration")
     info_table.add_column("key", style="cyan", no_wrap=True)
     info_table.add_column("value", style="white")
     info_table.add_row("Target URL", normalized_url)
     info_table.add_row("Domain", domain)
     info_table.add_row("Modules", ", ".join(selected))
-    info_table.add_row("Request timeout", f"{timeout}s")
+    info_table.add_row("Request deadline", f"{timeout}s total")
     info_table.add_row("Concurrency", str(min(config.concurrency, len(selected))))
     info_table.add_row("Module retries", str(module_retries))
     info_table.add_row("Scan ID", evidence_store.scan_id)
@@ -171,6 +209,10 @@ def scan(
     info_table.add_row("Target HTTP budget", str(max_requests))
     info_table.add_row("Hard module timeout", f"{module_timeout}s")
     info_table.add_row("Hard global timeout", f"{global_timeout}s")
+    info_table.add_row(
+        "Target preflight",
+        "skipped" if skip_preflight else f"{preflight.get('tcp')} ({preflight.get('attempts', 0)} attempt(s))",
+    )
     if evidence_dir:
         info_table.add_row("Evidence dir", evidence_dir)
     console.print(info_table)
@@ -224,6 +266,8 @@ def scan(
         for item in module_results:
             style = {
                 "success": "green",
+                "partial": "yellow",
+                "inconclusive": "yellow",
                 "failed": "red",
                 "timeout": "yellow",
                 "aborted": "yellow",
@@ -249,11 +293,13 @@ def scan(
             runtime_metadata={
                 "target_http_requests_used": scan_context.request_budget.requests_used,
                 "target_http_request_budget": max_requests,
-                "request_timeout_seconds": timeout,
+                "request_deadline_seconds": timeout,
                 "module_timeout_seconds": module_timeout,
                 "global_timeout_seconds": global_timeout,
                 "concurrency": min(config.concurrency, len(selected)),
                 "scope_mode": "root-only" if root_only else "root-and-subdomains",
+                "preflight": preflight,
+                "target_health": scan_context.target_health.snapshot(),
                 "external_intelligence_http_counted_in_target_budget": False,
                 "raw_socket_and_dns_operations_counted_in_target_http_budget": False,
             },
