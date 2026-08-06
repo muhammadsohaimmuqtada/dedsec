@@ -1,4 +1,5 @@
 import importlib
+import os
 from dataclasses import asdict, dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -21,6 +22,7 @@ class PluginManager:
     """Validated plugin registry with explicit diagnostics and opt-in discovery."""
 
     ENTRY_POINT_GROUP = "dedsec.modules"
+    ENABLE_ENV = "DEDSEC_ENABLE_PLUGINS"
 
     def __init__(self):
         self._plugins: Dict[str, PluginRegistration] = {}
@@ -83,13 +85,21 @@ class PluginManager:
             )
             return False
 
-    def discover_entry_points(self, enabled: bool = False) -> int:
+    @classmethod
+    def _environment_enabled(cls) -> bool:
+        value = os.environ.get(cls.ENABLE_ENV, "").strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    def discover_entry_points(self, enabled: Optional[bool] = None) -> int:
         """Discover installed third-party plugins only after explicit opt-in.
 
         Importing a Python entry point executes third-party package code. DEDSEC
         therefore does not perform that action as a side effect of an ordinary
-        built-in scan. Callers must explicitly enable plugin discovery.
+        built-in scan. Callers may pass ``enabled=True`` or set
+        ``DEDSEC_ENABLE_PLUGINS=1`` explicitly.
         """
+        if enabled is None:
+            enabled = self._environment_enabled()
         if not enabled:
             return 0
         try:
