@@ -18,7 +18,7 @@ class PluginRegistration:
 
 
 class PluginManager:
-    """Validated plugin registry with explicit diagnostics and entry-point discovery."""
+    """Validated plugin registry with explicit diagnostics and opt-in discovery."""
 
     ENTRY_POINT_GROUP = "dedsec.modules"
 
@@ -66,6 +66,7 @@ class PluginManager:
                 raise TypeError("Plugin METADATA must be a ModuleMetadata instance")
             if declared.key != key:
                 raise ValueError("Plugin metadata key does not match registered key")
+            declared.validate()
             self._plugins[key] = PluginRegistration(
                 metadata=declared,
                 import_path=import_path,
@@ -83,7 +84,15 @@ class PluginManager:
             )
             return False
 
-    def discover_entry_points(self) -> int:
+    def discover_entry_points(self, enabled: bool = False) -> int:
+        """Discover installed third-party plugins only after explicit opt-in.
+
+        Importing a Python entry point executes third-party package code. DEDSEC
+        therefore does not perform that action as a side effect of an ordinary
+        built-in scan. Callers must explicitly enable plugin discovery.
+        """
+        if not enabled:
+            return 0
         try:
             entry_points = importlib_metadata.entry_points()
             if hasattr(entry_points, "select"):
@@ -100,18 +109,19 @@ class PluginManager:
         for entry in candidates:
             try:
                 module = entry.load()
-                import_path = getattr(module, "__name__", None) or str(entry.value)
+                import_path = getattr(module, "__name__", None) or str(entry.value).split(":", 1)[0]
                 declared = getattr(module, "METADATA", None)
                 if not isinstance(declared, ModuleMetadata):
                     raise ValueError("Entry-point plugin must expose ModuleMetadata as METADATA")
-                if self.register_plugin(
-                    declared.key,
-                    import_path,
-                    declared.display_name,
+                declared.validate()
+                if declared.key in self._plugins:
+                    raise ValueError("Plugin key already registered: %s" % declared.key)
+                self._plugins[declared.key] = PluginRegistration(
                     metadata=declared,
+                    import_path=import_path,
                     source="entry-point:%s" % entry.name,
-                ):
-                    added += 1
+                )
+                added += 1
             except Exception as exc:
                 self._errors.append(
                     {
