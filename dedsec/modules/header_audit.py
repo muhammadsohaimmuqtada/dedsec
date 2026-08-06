@@ -1,5 +1,5 @@
 from dedsec.core.colors import Colors
-from dedsec.core.utils import error, info, safe_request, section, warn
+from dedsec.core.utils import error, info, safe_request, section
 
 
 def _analyze_csp(value):
@@ -167,9 +167,20 @@ SECURITY_HEADERS = {
     },
 }
 
-DISCLOSURE_HEADERS = ["server", "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version", "x-generator"]
+DISCLOSURE_HEADERS = [
+    "server",
+    "x-powered-by",
+    "x-aspnet-version",
+    "x-aspnetmvc-version",
+    "x-generator",
+]
 INFORMATIONAL_HEADERS = ["nel", "report-to"]
-SEVERITY_COLORS = {"HIGH": Colors.RED, "MEDIUM": Colors.YELLOW, "LOW": Colors.DIM, "INFO": Colors.DIM}
+SEVERITY_COLORS = {
+    "HIGH": Colors.RED,
+    "MEDIUM": Colors.YELLOW,
+    "LOW": Colors.DIM,
+    "INFO": Colors.DIM,
+}
 
 
 def _validate_header(meta, value, url):
@@ -232,7 +243,10 @@ def run(url, domain, timeout=10):
             if not optional:
                 earned_weight += weight
             print(f"  {Colors.GREEN}✔{Colors.RESET}  {Colors.BOLD}{meta['label']}{Colors.RESET}")
-            print(f"      {Colors.DIM}Value: {value[:100]}{'...' if len(value) > 100 else ''}{Colors.RESET}")
+            print(
+                f"      {Colors.DIM}Value: {value[:100]}"
+                f"{'...' if len(value) > 100 else ''}{Colors.RESET}"
+            )
         else:
             weak[header_key] = {
                 "severity": severity,
@@ -240,7 +254,10 @@ def run(url, domain, timeout=10):
                 "issue": detail,
                 "group": meta["group"],
             }
-            print(f"  {Colors.YELLOW}!{Colors.RESET}  {Colors.BOLD}{meta['label']}{Colors.RESET} [{color}{severity}{Colors.RESET}]")
+            print(
+                f"  {Colors.YELLOW}!{Colors.RESET}  {Colors.BOLD}{meta['label']}{Colors.RESET} "
+                f"[{color}{severity}{Colors.RESET}]"
+            )
             print(f"      {Colors.DIM}{detail}{Colors.RESET}")
 
     results["present"] = present
@@ -273,7 +290,6 @@ def run(url, domain, timeout=10):
         "optional_hardening_missing": sorted(optional_missing),
         "note": "Coverage score measures selected header controls; it is not a vulnerability or overall site-security score.",
     }
-    # Backward-compatible score object with clarified semantics.
     results["score"] = {
         "percentage": percentage,
         "strong": len(present),
@@ -283,6 +299,7 @@ def run(url, domain, timeout=10):
     }
     info(
         "Header Coverage",
-        f"{percentage}% weighted coverage ({len(present)} present, {len(weak)} weak, {len(missing)} required missing)",
+        f"{percentage}% weighted coverage ({len(present)} present, {len(weak)} weak, "
+        f"{len(missing)} required missing)",
     )
     return results
