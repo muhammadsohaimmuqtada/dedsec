@@ -53,7 +53,6 @@ class SafeResponse:
         return repr(self._response)
 
 
-
 def _truthy_response(response):
     if response is None or isinstance(response, SafeResponse):
         return response
@@ -91,7 +90,10 @@ def _build_session(total_retries=3, backoff_factor=0.5, pool_connections=20, poo
 
 _SESSION = _build_session()
 _REQUEST_CACHE = {}
-_CONTEXT_LOCAL = threading.local()
+_CACHE_LOCK = threading.RLock()
+_BOUND_CONTEXT = None
+_BOUND_TRANSPORT = None
+_BINDING_LOCK = threading.RLock()
 
 
 def configure_http_session(total_retries=3, backoff_factor=0.5, pool_connections=20, pool_maxsize=40):
@@ -105,22 +107,30 @@ def configure_http_session(total_retries=3, backoff_factor=0.5, pool_connections
 
 
 def bind_scan_context(context, retries=2, backoff=0.4, pool_connections=20, pool_maxsize=40):
-    _CONTEXT_LOCAL.context = context
-    _CONTEXT_LOCAL.transport = context.get_transport(
-        retries=retries,
-        backoff=backoff,
-        verify_tls=True,
-        pool_connections=pool_connections,
-        pool_maxsize=pool_maxsize,
-    )
+    """Bind one process-wide scan context for legacy helpers.
+
+    Modules execute in dedicated child processes, so process-wide binding is
+    safe and intentionally visible to ThreadPoolExecutor workers spawned inside
+    that module. A thread-local binding would silently let those worker threads
+    bypass scope and request-budget enforcement.
+    """
+    global _BOUND_CONTEXT, _BOUND_TRANSPORT
+    with _BINDING_LOCK:
+        _BOUND_CONTEXT = context
+        _BOUND_TRANSPORT = context.get_transport(
+            retries=retries,
+            backoff=backoff,
+            verify_tls=True,
+            pool_connections=pool_connections,
+            pool_maxsize=pool_maxsize,
+        )
 
 
 def unbind_scan_context():
-    for name in ("context", "transport"):
-        try:
-            delattr(_CONTEXT_LOCAL, name)
-        except AttributeError:
-            pass
+    global _BOUND_CONTEXT, _BOUND_TRANSPORT
+    with _BINDING_LOCK:
+        _BOUND_CONTEXT = None
+        _BOUND_TRANSPORT = None
 
 
 @contextmanager
@@ -169,8 +179,10 @@ def safe_request(
     if headers:
         merged_headers.update(headers)
 
-    context = getattr(_CONTEXT_LOCAL, "context", None)
-    transport = getattr(_CONTEXT_LOCAL, "transport", None)
+    with _BINDING_LOCK:
+        context = _BOUND_CONTEXT
+        transport = _BOUND_TRANSPORT
+
     if context is not None and transport is not None and not external_request:
         decision = context.scope.check_url(url)
         if decision.allowed:
@@ -192,8 +204,11 @@ def safe_request(
 
     cacheable = cache and method_upper == "GET" and data is None and json is None
     key = _cache_key(url, method_upper, allow_redirects, verify, merged_headers, params)
-    if cacheable and key in _REQUEST_CACHE:
-        return _truthy_response(_REQUEST_CACHE[key])
+    if cacheable:
+        with _CACHE_LOCK:
+            cached = _REQUEST_CACHE.get(key)
+        if cached is not None:
+            return _truthy_response(cached)
 
     client = session or _SESSION
     try:
@@ -209,7 +224,8 @@ def safe_request(
             json=json,
         )
         if cacheable:
-            _REQUEST_CACHE[key] = response
+            with _CACHE_LOCK:
+                _REQUEST_CACHE[key] = response
         return _truthy_response(response)
     except requests.RequestException:
         return None
@@ -280,7 +296,8 @@ def cached_resolve_ips(domain: str):
 def clear_runtime_caches():
     cached_resolve_ipv4.cache_clear()
     cached_resolve_ips.cache_clear()
-    _REQUEST_CACHE.clear()
+    with _CACHE_LOCK:
+        _REQUEST_CACHE.clear()
 
 
 def section(title, icon):
