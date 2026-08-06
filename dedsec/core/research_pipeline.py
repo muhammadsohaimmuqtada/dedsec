@@ -46,6 +46,16 @@ class ResearchPipeline:
         self.project_store: Optional[ProjectStore] = None
         self.project_diff: Optional[Dict[str, Any]] = None
 
+    def _sync_metadata(self) -> None:
+        self.workspace.metadata["pipeline"] = dict(self.metadata)
+
+    def _checkpoint(self, stage: str) -> None:
+        if self.project_store is None:
+            return
+        self.metadata["last_checkpoint_stage"] = stage
+        self._sync_metadata()
+        self.project_store.checkpoint(self.workspace)
+
     def _configure_project(self, project_path: Optional[str], resume: bool) -> None:
         if not project_path:
             return
@@ -55,16 +65,24 @@ class ResearchPipeline:
             checkpoint = self.project_store.latest_checkpoint(self.context.domain)
             if checkpoint:
                 self.workspace.merge_snapshot(checkpoint)
+                inherited_scan_id = checkpoint.get("scan_id")
                 self.workspace.scan_id = self.context.scan_id
-                self.workspace.coverage.requests_discovered = 0
+                self.workspace.coverage.requests_discovered = len(self.workspace.requests)
+                self.workspace.coverage.insertion_points_discovered = sum(
+                    len(request.insertion_points) for request in self.workspace.requests.values()
+                )
                 self.workspace.coverage.requests_observed = 0
                 self.workspace.coverage.requests_audited = 0
                 self.workspace.coverage.requests_skipped = 0
-                self.workspace.coverage.insertion_points_discovered = 0
                 self.workspace.coverage.insertion_points_audited = 0
                 self.workspace.coverage.insertion_points_skipped = 0
                 self.workspace.coverage.skipped_reasons = {}
-                self.metadata["resumed_from_scan_id"] = checkpoint.get("scan_id")
+                self.workspace.metadata["generated_at"] = _utc_now()
+                self.metadata["resumed_from_scan_id"] = inherited_scan_id
+                self.metadata["resumed_requests"] = len(self.workspace.requests)
+                self.metadata["resumed_insertion_points"] = sum(
+                    len(request.insertion_points) for request in self.workspace.requests.values()
+                )
 
     def _configure_identity(self, auth_file: Optional[str]) -> Dict[str, str]:
         if not auth_file:
@@ -143,6 +161,7 @@ class ResearchPipeline:
                 "maximum_impact": maximum_impact,
             }
         self.workspace.metadata["network_paths"] = self.metadata["network_paths"]
+        self._checkpoint("prepared")
 
         if deep:
             config = CrawlConfig(
@@ -165,8 +184,7 @@ class ResearchPipeline:
                 default_headers=headers,
             )
             self.metadata["crawler"] = crawler.crawl(self.context.target_url)
-            if self.project_store is not None:
-                self.project_store.checkpoint(self.workspace)
+            self._checkpoint("crawler")
 
         specs = []
         for path in api_specs or []:
@@ -174,12 +192,13 @@ class ResearchPipeline:
             if expanded not in specs:
                 specs.append(expanded)
         if specs:
-            importer = OpenAPIImporter(self.context.target_url)
+            importer = OpenAPIImporter(self.context.target_url, scope=self.context.scope)
             imported = []
             identity_id = getattr(self.context, "identity_id", "identity-anonymous")
             for path in specs:
                 imported.append(importer.ingest_file(self.workspace, path, identity_id=identity_id))
             self.metadata["api_import"] = imported
+            self._checkpoint("api-import")
 
         if browser:
             try:
@@ -194,6 +213,7 @@ class ResearchPipeline:
                 ).crawl(self.context.target_url, headers=headers)
             except BrowserUnavailable as exc:
                 self.metadata["browser"] = {"status": "unavailable", "reason": str(exc)}
+            self._checkpoint("browser")
 
         directories = []
         for item in template_dirs or []:
@@ -211,6 +231,7 @@ class ResearchPipeline:
                 self.workspace,
                 maximum_impact=template_impact,
             ).run(definitions)
+            self._checkpoint("templates")
 
         if audit_inputs:
             self.metadata["audit"] = AuditEngine(
@@ -223,8 +244,9 @@ class ResearchPipeline:
                     identity_id=None,
                 ),
             ).run()
+            self._checkpoint("audit")
 
-        self.workspace.metadata["pipeline"] = dict(self.metadata)
+        self._sync_metadata()
         return ResearchPipelineResult(self.workspace, dict(self.metadata), self.project_diff)
 
     def ingest_module_results(self, module_results: Iterable[ModuleResult]) -> None:
@@ -389,7 +411,8 @@ class ResearchPipeline:
                 )
                 self.workspace.add_observation(observation)
 
-        self.workspace.metadata["pipeline"] = dict(self.metadata)
+        self._sync_metadata()
+        self._checkpoint("modules")
 
     def compute_project_diff(self) -> Optional[Dict[str, Any]]:
         if self.project_store is None:
@@ -399,6 +422,7 @@ class ResearchPipeline:
         return self.project_diff
 
     def finalize(self, report: Optional[Dict[str, Any]] = None) -> ResearchPipelineResult:
+        self._sync_metadata()
         if self.project_store is not None:
             if self.project_diff is None:
                 self.project_diff = self.project_store.diff_workspace(self.workspace)
