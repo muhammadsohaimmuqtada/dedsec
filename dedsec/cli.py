@@ -2,6 +2,7 @@ import os
 import sys
 import threading
 from typing import Dict, List, Optional
+from urllib.parse import urlsplit
 
 import typer
 from rich.console import Console
@@ -59,12 +60,31 @@ def _plan_value(current, default, planned):
 
 
 def _parse_formats(value: str) -> List[str]:
-    formats = [item.strip().lower() for item in (value or "").replace(";", ",").split(",") if item.strip()]
+    formats = [
+        item.strip().lower()
+        for item in (value or "").replace(";", ",").split(",")
+        if item.strip()
+    ]
     supported = {"json", "jsonl", "sarif", "csv", "html"}
     unknown = sorted(set(formats) - supported)
     if unknown:
         raise typer.BadParameter("Unsupported export format(s): %s" % ", ".join(unknown))
     return formats
+
+
+def _target_origin_scope(scan_context: ScanContext, target_url: str):
+    """Validate only scheme/host/port before raw TCP preflight.
+
+    URL path include/exclude rules intentionally do not govern DNS/TCP
+    reachability telemetry because raw transport has no HTTP path.
+    """
+    parsed = urlsplit(target_url)
+    scheme = parsed.scheme.lower()
+    if scheme not in scan_context.scope.allowed_schemes:
+        return False, "target scheme outside configured scope"
+    port = parsed.port or (443 if scheme == "https" else 80)
+    decision = scan_context.scope.check_host(parsed.hostname or "", port=port)
+    return decision.allowed, decision.reason
 
 
 def scan(
@@ -79,8 +99,12 @@ def scan(
         min=1,
         help="Total logical HTTP request deadline in seconds, including retries/backoff",
     ),
-    concurrency: int = typer.Option(5, "--concurrency", min=1, help="Maximum concurrent module processes"),
-    threads: Optional[int] = typer.Option(None, "--threads", min=1, help="Deprecated alias for --concurrency"),
+    concurrency: int = typer.Option(
+        5, "--concurrency", min=1, help="Maximum concurrent module processes"
+    ),
+    threads: Optional[int] = typer.Option(
+        None, "--threads", min=1, help="Deprecated alias for --concurrency"
+    ),
     module_timeout: int = typer.Option(
         120, "--module-timeout", min=1, help="Hard per-module process deadline in seconds"
     ),
@@ -96,11 +120,15 @@ def scan(
     module_retries: int = typer.Option(
         1, "--module-retries", min=0, help="Retry whole modules after classified transient failure"
     ),
-    backoff: float = typer.Option(0.5, "--backoff", min=0.0, help="HTTP/module retry backoff factor"),
+    backoff: float = typer.Option(
+        0.5, "--backoff", min=0.0, help="HTTP/module retry backoff factor"
+    ),
     max_requests: int = typer.Option(
         1000, "--max-requests", min=1, help="Shared target HTTP request budget"
     ),
-    root_only: bool = typer.Option(False, "--root-only", help="Restrict target HTTP traffic to the root host"),
+    root_only: bool = typer.Option(
+        False, "--root-only", help="Restrict target HTTP traffic to the root host"
+    ),
     preflight_timeout: float = typer.Option(
         3.0,
         "--preflight-timeout",
@@ -122,8 +150,12 @@ def scan(
         "--deep",
         help="Enable bounded application crawling and request-corpus discovery",
     ),
-    crawl_depth: int = typer.Option(3, "--crawl-depth", min=0, help="Maximum static/browser crawl depth"),
-    crawl_pages: int = typer.Option(200, "--crawl-pages", min=1, help="Maximum static crawl pages"),
+    crawl_depth: int = typer.Option(
+        3, "--crawl-depth", min=0, help="Maximum static/browser crawl depth"
+    ),
+    crawl_pages: int = typer.Option(
+        200, "--crawl-pages", min=1, help="Maximum static crawl pages"
+    ),
     auth_file: Optional[str] = typer.Option(
         None,
         "--auth",
@@ -139,7 +171,9 @@ def scan(
         "--project",
         help="SQLite project database for history, diff, and resume",
     ),
-    resume: bool = typer.Option(False, "--resume", help="Resume knowledge from the latest project checkpoint"),
+    resume: bool = typer.Option(
+        False, "--resume", help="Resume knowledge from the latest project checkpoint"
+    ),
     template_dir: Optional[List[str]] = typer.Option(
         None,
         "--template-dir",
@@ -182,11 +216,15 @@ def scan(
         "--export-dir",
         help="Directory for additional report formats",
     ),
-    output: Optional[str] = typer.Option(None, "--output", help="Save schema 3.0 report to JSON file"),
+    output: Optional[str] = typer.Option(
+        None, "--output", help="Save schema 3.0 report to JSON file"
+    ),
     evidence_dir: Optional[str] = typer.Option(
         None, "--evidence-dir", help="Persist redacted per-module evidence artifacts"
     ),
-    json_output: bool = typer.Option(False, "--json", help="Print schema 3.0 report as JSON"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print schema 3.0 report as JSON"
+    ),
     market: bool = typer.Option(
         False,
         "--market",
@@ -275,8 +313,14 @@ def scan(
         error(str(exc))
         raise typer.Exit(code=1)
 
-    tokens = [token.strip() for token in (modules or "all").replace(",", " ").split() if token.strip()]
-    tokens.extend(token.strip() for token in (legacy_modules or []) if token and token.strip())
+    tokens = [
+        token.strip()
+        for token in (modules or "all").replace(",", " ").split()
+        if token.strip()
+    ]
+    tokens.extend(
+        token.strip() for token in (legacy_modules or []) if token and token.strip()
+    )
     if plan is not None and modules == "all" and plan.modules:
         tokens = list(plan.modules)
     module_args = _validate_modules(tokens or ["all"], execution_map)
@@ -339,6 +383,14 @@ def scan(
         include_paths=include_paths,
         exclude_paths=exclude_paths,
     )
+    scan_context.metadata["maximum_impact"] = max_impact
+
+    origin_allowed, origin_reason = _target_origin_scope(scan_context, normalized_url)
+    if not origin_allowed:
+        scan_context.close()
+        error("Target origin is excluded by configured scan scope: %s" % origin_reason)
+        raise typer.Exit(code=2)
+
     evidence_store = scan_context.evidence
 
     if skip_preflight:
@@ -398,7 +450,9 @@ def scan(
     info_table.add_row("Hard global timeout", f"{global_timeout}s")
     info_table.add_row(
         "Target preflight",
-        "skipped" if skip_preflight else f"{preflight.get('tcp')} ({preflight.get('attempts', 0)} attempt(s))",
+        "skipped"
+        if skip_preflight
+        else f"{preflight.get('tcp')} ({preflight.get('attempts', 0)} attempt(s))",
     )
     info_table.add_row("Deep discovery", "enabled" if deep else "disabled")
     info_table.add_row("Input audit", "enabled" if audit_inputs else "disabled")
@@ -406,7 +460,8 @@ def scan(
         auth_meta = research.metadata.get("authentication") or {}
         info_table.add_row(
             "Identity",
-            "%s (%s)" % (
+            "%s (%s)"
+            % (
                 auth_meta.get("label", "configured"),
                 "verified" if auth_meta.get("verified") else "not verified",
             ),
@@ -456,9 +511,6 @@ def scan(
             sys.stdout = capture._real
 
         pipeline.ingest_module_results(module_results)
-        project_diff = None
-        if project and (plan is None or plan.project.diff):
-            project_diff = pipeline.compute_project_diff()
 
         for item in module_results:
             if item.output:
@@ -487,6 +539,11 @@ def scan(
         console.print(summary)
 
         correlated = FindingsCorrelator().correlate(module_results)
+        pipeline.ingest_correlation(correlated)
+        project_diff = None
+        if project and (plan is None or plan.project.diff):
+            project_diff = pipeline.compute_project_diff()
+
         report_data = generate_report(
             normalized_url,
             domain,

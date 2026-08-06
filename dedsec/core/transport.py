@@ -35,13 +35,14 @@ class RequestOutcome:
 
 
 class TransportEngine:
-    """Scoped HTTP transport with exact budgeting, deadlines, auth context, and health feedback."""
+    """Scoped HTTP transport with exact budgeting, deadlines, auth isolation, and health feedback."""
 
     RETRYABLE_STATUS = {429, 500, 502, 503, 504}
     RETRYABLE_FAILURES = {"connect_timeout", "read_timeout", "timeout", "connection"}
     ROOT_HEALTH_FAILURES = {"connect_timeout", "timeout", "connection"}
     REDIRECT_STATUS = {301, 302, 303, 307, 308}
     MAX_REDIRECTS = 5
+    SENSITIVE_HEADERS = {"authorization", "proxy-authorization", "cookie"}
 
     def __init__(
         self,
@@ -67,6 +68,7 @@ class TransportEngine:
         self._cache: Dict[str, requests.Response] = {}
         self._lock = threading.RLock()
         self._health_endpoint = self._endpoint_key(context.target_url)
+        self._credential_endpoint = self._health_endpoint
 
     @staticmethod
     def _stable(value: Any) -> str:
@@ -88,9 +90,25 @@ class TransportEngine:
         port = parsed.port or default_port
         return scheme, host, port
 
-    def _merge_headers(self, headers: Optional[Dict[str, str]]) -> Dict[str, str]:
-        merged = {str(k): str(v) for k, v in getattr(self.context, "default_headers", {}).items()}
-        for key, value in (headers or {}).items():
+    def _headers_for_url(
+        self,
+        url: str,
+        explicit_headers: Optional[Dict[str, str]],
+        original_endpoint=None,
+    ) -> Dict[str, str]:
+        endpoint = self._endpoint_key(url)
+        merged: Dict[str, str] = {}
+        if endpoint == self._credential_endpoint:
+            merged.update(
+                {str(k): str(v) for k, v in getattr(self.context, "default_headers", {}).items()}
+            )
+        for key, value in (explicit_headers or {}).items():
+            if (
+                original_endpoint is not None
+                and endpoint != original_endpoint
+                and str(key).lower() in self.SENSITIVE_HEADERS
+            ):
+                continue
             merged[str(key)] = str(value)
         return merged
 
@@ -184,7 +202,6 @@ class TransportEngine:
         params: Any,
         json_body: Any,
     ) -> RequestOutcome:
-        """Execute one logical request under one total deadline."""
         max_attempts = 1 + (self.retries if method in {"GET", "HEAD"} else 0)
         started = time.monotonic()
         deadline = started + max(0.001, float(timeout))
@@ -220,12 +237,7 @@ class TransportEngine:
                 )
                 if response.status_code in self.RETRYABLE_STATUS and attempt < max_attempts:
                     if not self._sleep_retry(attempt, deadline, response=response):
-                        return RequestOutcome(
-                            response,
-                            None,
-                            time.monotonic() - started,
-                            attempt,
-                        )
+                        return RequestOutcome(response, None, time.monotonic() - started, attempt)
                     continue
                 return RequestOutcome(response, None, time.monotonic() - started, attempt)
             except Exception as exc:
@@ -288,16 +300,12 @@ class TransportEngine:
         enforce_scope: bool = True,
     ) -> RequestOutcome:
         method_upper = method.upper()
-        merged_headers = self._merge_headers(headers)
+        original_endpoint = self._endpoint_key(url)
+        initial_headers = self._headers_for_url(url, headers, original_endpoint)
         if enforce_scope:
             decision = self.context.scope.check_url(url)
             if not decision.allowed:
-                return RequestOutcome(
-                    None,
-                    RequestFailure("scope", decision.reason),
-                    0.0,
-                    0,
-                )
+                return RequestOutcome(None, RequestFailure("scope", decision.reason), 0.0, 0)
 
         short_circuit = self._health_short_circuit(url)
         if short_circuit is not None:
@@ -307,7 +315,7 @@ class TransportEngine:
             method_upper,
             url,
             allow_redirects,
-            merged_headers,
+            initial_headers,
             data,
             params,
             json_body,
@@ -358,11 +366,12 @@ class TransportEngine:
                     total_attempts,
                 )
 
+            current_headers = self._headers_for_url(current_url, headers, original_endpoint)
             outcome = self._request_one(
                 current_method,
                 current_url,
                 timeout=remaining,
-                headers=merged_headers,
+                headers=current_headers,
                 data=current_data,
                 params=params if redirect_index == 0 else None,
                 json_body=current_json,
@@ -412,12 +421,7 @@ class TransportEngine:
         if cacheable and final_response is not None:
             with self._lock:
                 self._cache[key] = final_response
-        return RequestOutcome(
-            final_response,
-            None,
-            time.monotonic() - started,
-            total_attempts,
-        )
+        return RequestOutcome(final_response, None, time.monotonic() - started, total_attempts)
 
     def session_cookies(self) -> Dict[str, str]:
         return {cookie.name: cookie.value for cookie in self._session.cookies}

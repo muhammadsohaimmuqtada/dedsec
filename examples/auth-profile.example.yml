@@ -1,0 +1,18 @@
+# Example only. Replace placeholders locally and never commit real credentials.
+label: researcher-customer
+kind: bearer
+role: customer
+tenant: example-tenant
+
+# Placeholder only; DEDSEC does not resolve environment variables automatically.
+token: REPLACE_WITH_LOCAL_TEST_TOKEN
+
+verification:
+  url: /api/me
+  expect_status: 200
+  # Optional signals. Adjust only to your authorized target.
+  # body_regex: '"authenticated"\s*:\s*true'
+  # logged_out_regex: 'Sign in|Log in'
+
+metadata:
+  purpose: authorized-test-identity

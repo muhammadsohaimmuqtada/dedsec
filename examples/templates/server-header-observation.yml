@@ -1,0 +1,22 @@
+id: passive-server-header
+name: Server header observed
+mode: passive
+impact: passive
+severity: INFO
+classification: configuration-observation
+
+description: >-
+  Records the presence/value of the HTTP Server header from an already-observed
+  response. This is an informational configuration observation, not a vulnerability.
+
+matchers:
+  - type: header
+    name: Server
+
+extractors:
+  - type: header
+    name: server
+    header: Server
+
+references:
+  - https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Server
