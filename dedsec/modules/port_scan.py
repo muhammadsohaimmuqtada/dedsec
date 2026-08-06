@@ -27,6 +27,11 @@ REVIEW_PORTS = {
     9200, 9300, 11211, 15672, 27017,
 }
 HTTP_PORTS = {80, 443, 5000, 8080, 8443, 8888}
+FILTERED_CONNECT_CODES = {errno.ETIMEDOUT}
+for _errno_name in ("EAGAIN", "EWOULDBLOCK", "EINPROGRESS", "EALREADY"):
+    _errno_value = getattr(errno, _errno_name, None)
+    if _errno_value is not None:
+        FILTERED_CONNECT_CODES.add(_errno_value)
 
 
 def _classify_connect_code(code):
@@ -34,7 +39,7 @@ def _classify_connect_code(code):
         return "open"
     if code == errno.ECONNREFUSED:
         return "closed"
-    if code == errno.ETIMEDOUT:
+    if code in FILTERED_CONNECT_CODES:
         return "filtered"
     if code in {errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EHOSTDOWN}:
         return "unreachable"
@@ -143,9 +148,15 @@ def run(url, domain, timeout=10):
         print(f"\n{Colors.GREEN}[+]{Colors.RESET} {Colors.BOLD}Open Ports:{Colors.RESET}")
         for port, service in open_ports:
             review = f"  {Colors.YELLOW}review exposure{Colors.RESET}" if port in REVIEW_PORTS else ""
-            print(f"    {Colors.GREEN}●{Colors.RESET}  {Colors.BOLD}{port:5}{Colors.RESET}  {Colors.CYAN}{service:<18}{Colors.RESET}{review}")
+            print(
+                f"    {Colors.GREEN}●{Colors.RESET}  {Colors.BOLD}{port:5}{Colors.RESET}  "
+                f"{Colors.CYAN}{service:<18}{Colors.RESET}{review}"
+            )
             if port in banners:
-                print(f"           {Colors.DIM}Banner: {banners[port].replace(chr(10), ' ')[:120]}{Colors.RESET}")
+                print(
+                    f"           {Colors.DIM}Banner: "
+                    f"{banners[port].replace(chr(10), ' ')[:120]}{Colors.RESET}"
+                )
             for key, value in http_headers.get(port, {}).items():
                 print(f"           {Colors.DIM}{key}: {value}{Colors.RESET}")
             if port in REVIEW_PORTS:
@@ -154,7 +165,10 @@ def run(url, domain, timeout=10):
                         "port": port,
                         "service": service,
                         "classification": "exposure-review",
-                        "note": "Open service requires context-specific access-control/version review; port number alone is not a vulnerability.",
+                        "note": (
+                            "Open service requires context-specific access-control/version review; "
+                            "port number alone is not a vulnerability."
+                        ),
                     }
                 )
 
