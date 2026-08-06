@@ -3,7 +3,7 @@ import html
 import json
 import os
 import tempfile
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List
 
 
 def _atomic_text(path: str, text: str) -> str:
@@ -39,6 +39,24 @@ def _findings(report: Dict[str, Any]) -> List[Dict[str, Any]]:
             entry.setdefault("classification", "hypothesis")
             findings.append(entry)
     return findings
+
+
+def _csv_cell(value: Any) -> str:
+    """Neutralize spreadsheet formula interpretation without altering report data."""
+    text = "" if value is None else str(value)
+    stripped = text.lstrip(" \t\r\n")
+    if stripped.startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
+def _safe_basename(value: str) -> str:
+    name = str(value or "").strip()
+    if not name or name in {".", ".."}:
+        raise ValueError("Export basename must be a non-empty file stem")
+    if os.path.basename(name) != name or "/" in name or "\\" in name:
+        raise ValueError("Export basename must not contain path separators")
+    return name
 
 
 def export_json(report: Dict[str, Any], path: str) -> str:
@@ -147,17 +165,16 @@ def export_csv(report: Dict[str, Any], path: str) -> str:
             writer.writeheader()
             target = (report.get("target") or {}).get("url") or ""
             for item in _findings(report):
-                writer.writerow(
-                    {
-                        "classification": item.get("classification"),
-                        "severity": item.get("severity"),
-                        "confidence": item.get("confidence"),
-                        "title": item.get("title") or item.get("summary") or item.get("type"),
-                        "url": item.get("url") or target,
-                        "module": item.get("module"),
-                        "evidence_ids": ";".join(item.get("evidence_ids") or []),
-                    }
-                )
+                row = {
+                    "classification": item.get("classification"),
+                    "severity": item.get("severity"),
+                    "confidence": item.get("confidence"),
+                    "title": item.get("title") or item.get("summary") or item.get("type"),
+                    "url": item.get("url") or target,
+                    "module": item.get("module"),
+                    "evidence_ids": ";".join(item.get("evidence_ids") or []),
+                }
+                writer.writerow({key: _csv_cell(value) for key, value in row.items()})
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_name, destination)
@@ -212,19 +229,20 @@ def export_report(
 ) -> Dict[str, str]:
     expanded = os.path.abspath(os.path.expanduser(directory))
     os.makedirs(expanded, exist_ok=True)
+    safe_basename = _safe_basename(basename)
     outputs: Dict[str, str] = {}
     for raw_format in formats:
         format_name = str(raw_format).lower()
         if format_name == "json":
-            outputs[format_name] = export_json(report, os.path.join(expanded, basename + ".json"))
+            outputs[format_name] = export_json(report, os.path.join(expanded, safe_basename + ".json"))
         elif format_name == "jsonl":
-            outputs[format_name] = export_jsonl(report, os.path.join(expanded, basename + ".jsonl"))
+            outputs[format_name] = export_jsonl(report, os.path.join(expanded, safe_basename + ".jsonl"))
         elif format_name == "sarif":
-            outputs[format_name] = export_sarif(report, os.path.join(expanded, basename + ".sarif"))
+            outputs[format_name] = export_sarif(report, os.path.join(expanded, safe_basename + ".sarif"))
         elif format_name == "csv":
-            outputs[format_name] = export_csv(report, os.path.join(expanded, basename + ".csv"))
+            outputs[format_name] = export_csv(report, os.path.join(expanded, safe_basename + ".csv"))
         elif format_name == "html":
-            outputs[format_name] = export_html(report, os.path.join(expanded, basename + ".html"))
+            outputs[format_name] = export_html(report, os.path.join(expanded, safe_basename + ".html"))
         else:
             raise ValueError("Unsupported export format: %s" % format_name)
     return outputs
