@@ -13,10 +13,10 @@ def run(url, domain, timeout=10):
     }
 
     attacker_origins = [
-        "https://evil.example.com",
-        f"https://{domain}.evil.com",
+        "https://attacker.invalid",
+        f"https://{domain}.attacker.invalid",
         "null",
-        f"https://evil{domain}",
+        f"https://evil-{domain.replace('.', '-')}.invalid",
         f"http://{domain}",
     ]
 
@@ -49,16 +49,17 @@ def run(url, domain, timeout=10):
         }
 
         if acao == origin and acac == "true":
-            item = dict(
-                base,
-                severity="MEDIUM",
-                issue="Arbitrary Origin reflection with credentials",
-                candidate=True,
-                confirmed=False,
-                impact=None,
-                note="Potentially dangerous configuration; sensitive cross-origin readability was not demonstrated by this probe.",
+            results["findings"].append(
+                dict(
+                    base,
+                    severity="MEDIUM",
+                    issue="Arbitrary Origin reflection with credentials",
+                    candidate=True,
+                    confirmed=False,
+                    impact=None,
+                    note="Potentially dangerous configuration; sensitive cross-origin readability was not demonstrated by this probe.",
+                )
             )
-            results["findings"].append(item)
         elif acao == origin:
             results["observations"].append(
                 dict(
@@ -84,9 +85,6 @@ def run(url, domain, timeout=10):
                 )
             )
 
-    # This module intentionally does not claim a verified vulnerability from
-    # header behavior alone. Correlation may elevate a candidate only when a
-    # separate impact-bearing validation result exists.
     results["vulnerable"] = any(item.get("confirmed") is True for item in results["findings"])
 
     if results["findings"]:
