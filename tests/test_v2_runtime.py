@@ -1,3 +1,4 @@
+import socket
 import sys
 import time
 import types
@@ -8,6 +9,7 @@ import requests
 
 from dedsec.core.contracts import ScanConfig
 from dedsec.core.findings import VerifiedFinding
+from dedsec.core.health import TargetHealth, probe_target_connectivity
 from dedsec.core.orchestrator import run_modules
 from dedsec.core.runtime import ScanContext
 from dedsec.core.scope import ScopePolicy
@@ -46,12 +48,42 @@ class FindingContractTests(unittest.TestCase):
             )
 
 
+class TargetHealthTests(unittest.TestCase):
+    def test_failures_open_and_success_resets_circuit(self):
+        health = TargetHealth("example.com", failure_threshold=2, cooldown_seconds=30)
+        health.record_failure("connect_timeout")
+        self.assertEqual(health.snapshot()["state"], "degraded")
+        self.assertFalse(health.should_short_circuit())
+        health.record_failure("connect_timeout")
+        self.assertEqual(health.snapshot()["state"], "unreachable")
+        self.assertTrue(health.should_short_circuit())
+        health.record_success()
+        self.assertEqual(health.snapshot()["state"], "reachable")
+        self.assertFalse(health.should_short_circuit())
+
+    @patch("dedsec.core.health.socket.create_connection")
+    @patch("dedsec.core.health.socket.getaddrinfo")
+    def test_preflight_two_timeouts_open_health_circuit(self, getaddrinfo, create_connection):
+        getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.2.3.4", 443))
+        ]
+        create_connection.side_effect = [socket.timeout(), socket.timeout()]
+        health = TargetHealth("example.com", failure_threshold=2, cooldown_seconds=30)
+        result = probe_target_connectivity(
+            "https://example.com", health=health, timeout=0.01, attempts=2
+        )
+        self.assertEqual(result["tcp"], "filtered_or_timeout")
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(health.snapshot()["state"], "unreachable")
+        self.assertTrue(health.should_short_circuit())
+
+
 class TransportTests(unittest.TestCase):
-    def _context(self, max_requests=3):
+    def _context(self, max_requests=3, timeout=1):
         return ScanContext.build(
             target_url="https://example.com",
             domain="example.com",
-            timeout=1,
+            timeout=timeout,
             max_requests=max_requests,
         )
 
@@ -155,6 +187,47 @@ class TransportTests(unittest.TestCase):
         context.close()
 
     @patch("requests.Session.request")
+    def test_logical_request_deadline_is_not_multiplied_by_retries(self, request_mock):
+        def slow_timeout(*args, **kwargs):
+            time.sleep(min(float(kwargs["timeout"]), 0.03))
+            raise requests.exceptions.ConnectTimeout("connect timed out")
+
+        request_mock.side_effect = slow_timeout
+        context = self._context(max_requests=10, timeout=1)
+        engine = context.get_transport(retries=3, backoff=0)
+        started = time.monotonic()
+        outcome = engine.request(
+            "GET", "https://example.com/", timeout=0.05, cache=False
+        )
+        elapsed = time.monotonic() - started
+        self.assertFalse(outcome.ok)
+        self.assertLess(elapsed, 0.15)
+        self.assertLessEqual(outcome.attempts, 2)
+        context.close()
+
+    @patch("requests.Session.request")
+    def test_root_health_circuit_short_circuits_repeated_connection_failures(self, request_mock):
+        request_mock.side_effect = requests.exceptions.ConnectionError("network unreachable")
+        context = ScanContext.build(
+            "https://example.com",
+            "example.com",
+            timeout=1,
+            max_requests=10,
+            health_failure_threshold=2,
+            health_cooldown_seconds=30,
+        )
+        engine = context.get_transport(retries=0)
+        first = engine.request("GET", "https://example.com/a", cache=False)
+        second = engine.request("GET", "https://example.com/b", cache=False)
+        third = engine.request("GET", "https://example.com/c", cache=False)
+        self.assertFalse(first.ok)
+        self.assertFalse(second.ok)
+        self.assertEqual(third.failure.category, "target_unreachable")
+        self.assertEqual(third.attempts, 0)
+        self.assertEqual(request_mock.call_count, 2)
+        context.close()
+
+    @patch("requests.Session.request")
     def test_redirect_outside_scope_is_not_followed(self, request_mock):
         response = Mock(spec=requests.Response)
         response.status_code = 302
@@ -227,6 +300,37 @@ class RuntimeModuleCompatibilityTests(unittest.TestCase):
         self.assertLess(elapsed, 1.5)
         self.assertEqual(module_results[0].status, "timeout")
         self.assertEqual(results["slow"]["error"], "Module hard timeout exceeded")
+
+    def test_unreachable_root_skips_http_required_module_as_inconclusive(self):
+        name = "tests.fake_http_module"
+        module = types.ModuleType(name)
+
+        def run(url, domain, timeout):
+            raise AssertionError("HTTP-required module should have been skipped")
+
+        module.run = run
+        context = ScanContext.build(
+            "https://example.com",
+            "example.com",
+            health_failure_threshold=2,
+            health_cooldown_seconds=30,
+        )
+        context.target_health.record_failure("connect_timeout")
+        context.target_health.record_failure("connect_timeout")
+        with patch.dict(sys.modules, {name: module}):
+            results, module_results = run_modules(
+                ["tech"],
+                {"tech": (name, "Fake HTTP")},
+                context.target_url,
+                context.domain,
+                ScanConfig(concurrency=1, module_retries=0, module_timeout=2, global_timeout=3),
+                scan_context=context,
+            )
+        self.assertEqual(module_results[0].status, "inconclusive")
+        self.assertEqual(module_results[0].attempts, 0)
+        self.assertEqual(module_results[0].failure_class, "target_unreachable")
+        self.assertIn("unreachable", results["tech"]["error"].lower())
+        context.close()
 
 
 if __name__ == "__main__":
