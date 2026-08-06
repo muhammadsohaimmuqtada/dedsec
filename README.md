@@ -1,140 +1,169 @@
 # DEDSEC — Web Reconnaissance Framework
 
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
+[![CI](https://img.shields.io/github/actions/workflow/status/muhammadsohaimmuqtada/dedsec/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/muhammadsohaimmuqtada/dedsec/actions)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-DEDSEC is a modular reconnaissance framework for authorized web security testing. It brings common recon tasks into a single CLI, including WAF fingerprinting, technology detection, DNS inspection, TLS analysis, port checks, subdomain discovery, and endpoint extraction.
+DEDSEC is a modular reconnaissance framework for authorized web security testing. It combines discovery, service profiling, web-configuration analysis, endpoint extraction, evidence capture, and structured reporting in a single CLI.
 
-## Features
+The v2 architecture is moving DEDSEC toward an evidence-driven runtime: scanner output is preserved as evidence, heuristic signals remain candidates until they satisfy verification rules, and machine-readable reports distinguish observations from verified findings.
 
-| # | Module | Description |
-|---|---|---|
-| 1 | WAF Detection | Detects 12+ WAFs with confidence scoring and trigger payloads |
-| 2 | Tech Fingerprinting | Languages, servers, CMS, JS frameworks, CDN, analytics |
-| 3 | DNS Recon | A/AAAA/MX/NS/TXT/CNAME/SOA records + zone transfer attempt |
-| 4 | IP & GeoLocation | IP resolve + country, city, ISP, ASN via ip-api.com |
-| 5 | SSL/TLS Analysis | Cert expiry, SANs, protocol version, serial number |
-| 6 | Header Audit | 12 security headers check + information disclosure detection |
-| 7 | Open Redirect | Tests 15 common redirect parameters for open redirect |
-| 8 | Robots & Sitemap | Parses robots.txt + probes common sitemap URLs |
-| 9 | Cookie Audit | HttpOnly, Secure, SameSite flag checks with risk explanations |
-| 10 | Port Scan | Top 25 ports via concurrent scanning with service names |
-| 11 | WHOIS Lookup | Registrar, dates, nameservers, org, country |
-| 12 | Subdomain Enum | Passive via crt.sh Certificate Transparency (up to 50) |
-| 13 | JS & Endpoint Extraction | JS files, API endpoints, email addresses from page source |
+## Highlights
+
+- 24 built-in reconnaissance and security-posture modules
+- bounded concurrent module execution
+- HTTP connection pooling and retry controls
+- per-module and global timeout controls
+- evidence IDs, sensitive-value redaction, and optional evidence artifacts
+- versioned JSON report schema
+- observation → candidate → verified-finding correlation model
+- runtime scope and request-budget foundation for migrated modules
+- Rich terminal summaries
+- CI with Ruff and unit tests
+
+## Modules
+
+| Key | Module | Purpose |
+| --- | --- | --- |
+| `waf` | WAF Detection | Signature and response-behavior fingerprinting |
+| `tech` | Technology Fingerprinting | Server, framework, CMS, CDN, and application-stack signals |
+| `dns` | DNS Reconnaissance | DNS records and related security posture |
+| `geo` | IP & GeoLocation | IP, ASN, network, and geographic context |
+| `ssl` | SSL/TLS Analysis | Certificate and protocol analysis |
+| `headers` | HTTP Header Audit | Security headers and information-disclosure posture |
+| `redirect` | Open Redirect Check | Redirect-parameter and redirect-chain analysis |
+| `robots` | Robots & Sitemap | robots.txt and sitemap discovery |
+| `cookies` | Cookie Audit | Cookie security attributes and scope |
+| `ports` | Port Scan | Bounded TCP service discovery and lightweight fingerprints |
+| `whois` | WHOIS Lookup | Registration metadata |
+| `subdomains` | Subdomain Enumeration | Multi-source subdomain discovery and validation |
+| `js` | JS & Endpoint Extraction | JavaScript assets, routes, endpoint and secret candidates |
+| `hosting` | Hosting Intelligence | Hosting and network-provider context |
+| `exposures` | Common Exposure Checks | Sensitive-file and service-exposure candidates with content validation |
+| `cors` | CORS Check | Cross-origin configuration behavior |
+| `csp` | CSP Analyzer | Content-Security-Policy analysis |
+| `ratelimit` | Rate-Limit Check | Rate-limit behavior observations |
+| `clickjacking` | Framing Protection | X-Frame-Options and CSP frame-ancestors posture |
+| `email` | Email Security | SPF, DMARC, DKIM, MX, and related email posture |
+| `vhost` | Virtual Host Finder | Virtual-host discovery signals |
+| `api_schema` | API & OpenAPI Scanner | Public schema discovery and endpoint extraction |
+| `http_methods` | HTTP Methods Audit | HTTP method exposure analysis |
+| `security_policy` | Security Policy Audit | security.txt and disclosure-policy discovery |
 
 ## Installation
 
 ```bash
 git clone https://github.com/muhammadsohaimmuqtada/dedsec.git
 cd dedsec
-pip install -e .
+python -m pip install -e .
 ```
 
-Or install dependencies manually:
+For development:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -e '.[dev]'
 ```
 
 ## Usage
 
-**Scan all modules:**
+Run the full module set:
+
 ```bash
 dedsec https://example.com
 ```
 
-**Run specific modules:**
+Run selected modules:
+
 ```bash
-dedsec https://example.com --modules waf ssl headers dns
+dedsec https://example.com --modules waf,ssl,headers,dns
 ```
 
-**Tune safe performance limits:**
+Run the curated profile:
+
 ```bash
-dedsec https://example.com --concurrency 6 --timeout 12 --module-timeout 20 --global-timeout 90 --retries 3 --backoff 0.5
+dedsec https://example.com --market
 ```
 
-**JSON output:**
+Tune bounded execution:
+
+```bash
+dedsec https://example.com \
+  --concurrency 6 \
+  --timeout 12 \
+  --module-timeout 20 \
+  --global-timeout 90 \
+  --retries 3 \
+  --module-retries 1 \
+  --backoff 0.5
+```
+
+Use the v2 runtime guardrails for runtime-aware modules:
+
+```bash
+dedsec https://example.com --max-requests 750 --root-only
+```
+
+Persist redacted evidence artifacts and save the report:
+
+```bash
+dedsec https://example.com \
+  --evidence-dir ./dedsec-evidence \
+  --output report.json
+```
+
+Print the machine-readable report:
+
 ```bash
 dedsec https://example.com --json
 ```
 
-**Save report to file:**
-```bash
-dedsec https://example.com --output report.json --json
-```
+Run through Python:
 
-**Backward-compatible thread flag (maps to --concurrency):**
-```bash
-dedsec https://example.com --threads 5
-```
-
-**Run via Python module:**
 ```bash
 python -m dedsec https://example.com
 ```
 
-### Rich Terminal UI Example
+## Evidence and reporting
 
-```text
-                                Scan Configuration
-┏━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ key            ┃ value                                                             ┃
-┡━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ Target URL     │ https://example.com                                               │
-│ Domain         │ example.com                                                       │
-│ Modules        │ waf, tech, dns, geo, ssl                                         │
-│ Timeout        │ 10s                                                               │
-│ Concurrency    │ 5                                                                 │
-└────────────────┴───────────────────────────────────────────────────────────────────┘
+DEDSEC's report schema separates module execution from security conclusions. A scan can contain:
 
-                              Module Status Summary
-┏━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━┓
-┃ Module    ┃ Status  ┃ Duration (s) ┃
-┡━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━┩
-│ waf       │ SUCCESS │         1.20 │
-│ tech      │ SUCCESS │         0.44 │
-│ dns       │ TIMEOUT │        20.00 │
-└───────────┴─────────┴──────────────┘
+- **observations** — facts collected by modules
+- **hypotheses / candidates** — security-relevant signals that still require verification
+- **verified findings** — findings promoted only when the detector provides verification semantics and evidence references
+- **rejected or unverified outcomes** — failed modules and signals that were not promoted
+
+Evidence records include a scan ID, module provenance, timestamp, SHA-256 digest, redacted structured data, and an optional atomic JSON artifact. Sensitive-looking values are redacted before report/evidence output.
+
+See [the v2 evidence model](docs/v2-evidence-model.md) and [the core runtime plan](docs/CORE_RUNTIME_PLAN.md).
+
+## Runtime direction
+
+The current CLI remains compatible with the existing `run(url, domain, timeout)` module contract. Runtime-aware modules can opt into a shared scan context containing target scope, request budget, evidence state, and centralized transport. This lets DEDSEC migrate its built-in modules incrementally without a risky all-at-once rewrite.
+
+The next runtime stages are request-level evidence, normalized asset/endpoint stores, and dependency-aware scheduling so discoveries can be reused across modules instead of rediscovered independently.
+
+## Development
+
+Run lint and tests before opening a pull request:
+
+```bash
+ruff check .
+python -m unittest discover -s tests -v
 ```
 
-![Rich CLI output example](docs/assets/cli-rich-ui.png)
+Project contributions should keep network behavior bounded, avoid sensitive data in fixtures and output, and distinguish heuristic candidates from verified findings. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-### All Options
+## Security
 
-```text
-usage: dedsec [OPTIONS] URL
+Security issues in DEDSEC itself should be reported according to [SECURITY.md](SECURITY.md). Findings discovered against third-party systems should be disclosed through the target owner's authorized process.
 
-positional arguments:
-  url              Target URL (e.g., https://example.com)
+## Legal
 
-options:
-  --modules, -m        Modules to run (repeatable). Supports `all`
-  --timeout            Base request timeout in seconds (default: 10)
-  --concurrency        Bounded parallel module concurrency (default: 5)
-  --threads            Backward-compatible alias for --concurrency
-  --module-timeout     Per-module timeout in seconds
-  --global-timeout     Global scan timeout in seconds
-  --retries            HTTP retries with exponential backoff (default: 3)
-  --backoff            Retry backoff factor (default: 0.5)
-  --output             Save report to JSON file
-  --json               Print JSON report to stdout
-  --market             Run curated high-signal module profile
-  --version            Show version and exit
-```
+DEDSEC is intended for systems you own or have explicit authorization to test. You are responsible for complying with the scope and rules of any security-testing or bug-bounty program you participate in.
 
-## Requirements
+## License
 
-- Python 3.8+
-- `requests==2.32.3`
-- `dnspython==2.6.1`
-- `python-whois==0.9.5`
-- `rich==13.9.4`
-- `typer==0.12.5`
-
-## Legal Disclaimer
-
-> For authorized testing only. Obtain explicit written permission before scanning systems you do not own.
+MIT — see [LICENSE](LICENSE).
 
 ## Author
 
