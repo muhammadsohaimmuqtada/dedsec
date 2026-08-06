@@ -247,7 +247,11 @@ class AuthManager:
     def _verify(self, profile: AuthProfile, headers: Dict[str, str]) -> Dict[str, Any]:
         verification = profile.verification or {}
         if not verification:
-            return {"configured": False, "verified": bool(profile.kind != "workflow")}
+            return {
+                "configured": False,
+                "verified": False,
+                "reason": "verification-not-configured",
+            }
         target = urljoin(self.context.target_url, str(verification.get("url") or "/"))
         decision = self.context.scope.check_url(target)
         if not decision.allowed:

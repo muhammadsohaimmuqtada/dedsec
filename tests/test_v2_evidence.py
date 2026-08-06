@@ -206,7 +206,7 @@ class EvidenceV2Tests(unittest.TestCase):
             [failed],
             store,
         )
-        self.assertEqual(report["schema_version"], "2.1")
+        self.assertEqual(report["schema_version"], "3.0")
         self.assertEqual(report["summary"]["failed"], 1)
         self.assertEqual(report["summary"]["partial"], 0)
         self.assertEqual(report["summary"]["inconclusive"], 0)
