@@ -87,7 +87,7 @@ def _version_callback(value: bool):
 
 
 def scan(
-    url: str = typer.Argument(..., help="Target URL (e.g., https://example.com)"),
+    url: str = typer.Argument("", help="Target URL (e.g., https://example.com)"),
     modules: str = typer.Option(
         "all", "--modules", "-m", help="Modules to run (comma-separated or legacy space-separated)"
     ),
