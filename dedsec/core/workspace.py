@@ -101,6 +101,28 @@ class IdentityContext:
         return asdict(self)
 
 
+def _point_logical_key(point: InsertionPoint) -> Tuple[str, str]:
+    return str(point.location).lower(), str(point.name)
+
+
+def merge_insertion_points(
+    inferred: Sequence[InsertionPoint],
+    explicit: Optional[Sequence[InsertionPoint]] = None,
+) -> List[InsertionPoint]:
+    """Merge input surfaces without allowing explicit metadata to hide inference.
+
+    A logical input is keyed by location and name. Generic inference is loaded
+    first; richer explicit schema/crawler metadata replaces only the matching
+    logical input. Other inferred inputs remain present.
+    """
+    merged: Dict[Tuple[str, str], InsertionPoint] = {}
+    for point in inferred:
+        merged[_point_logical_key(point)] = point
+    for point in explicit or []:
+        merged[_point_logical_key(point)] = point
+    return [merged[key] for key in sorted(merged)]
+
+
 @dataclass
 class RequestRecord:
     id: str
@@ -131,14 +153,15 @@ class RequestRecord:
     ) -> "RequestRecord":
         normalized_url = canonical_url(url)
         normalized_method = (method or "GET").upper()
-        points = list(insertion_points or infer_insertion_points(
+        inferred = infer_insertion_points(
             normalized_method,
             normalized_url,
             headers=headers,
             body=body,
             content_type=content_type,
             source=source,
-        ))
+        )
+        points = merge_insertion_points(inferred, insertion_points)
         body_shape = body
         if isinstance(body, (dict, list)):
             body_shape = _stable_json(body)
@@ -544,7 +567,7 @@ def infer_insertion_points(
                         source=source,
                     )
                 )
-        elif lower.startswith("x-"):
+        elif lower == "authorization" or lower.startswith("x-"):
             points.append(
                 InsertionPoint(
                     location="header",
@@ -555,11 +578,17 @@ def infer_insertion_points(
             )
 
     normalized_type = (content_type or "").split(";", 1)[0].strip().lower()
-    if isinstance(body, (dict, list)) or normalized_type == "application/json":
+    is_json_type = normalized_type == "application/json" or normalized_type.endswith("+json")
+    if is_json_type or (isinstance(body, (dict, list)) and normalized_type not in {
+        "application/x-www-form-urlencoded",
+        "multipart/form-data",
+        "text/plain",
+    }):
         data = body
-        if isinstance(body, str):
+        if isinstance(body, (str, bytes)):
+            encoded = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
             try:
-                data = json.loads(body)
+                data = json.loads(encoded)
             except ValueError:
                 data = None
         if data is not None:
@@ -575,8 +604,12 @@ def infer_insertion_points(
                         )
                     )
     elif normalized_type == "application/x-www-form-urlencoded" and body:
-        encoded = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
-        for name, value in parse_qsl(encoded, keep_blank_values=True):
+        if isinstance(body, dict):
+            form_items = [(str(name), "" if value is None else str(value)) for name, value in body.items()]
+        else:
+            encoded = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
+            form_items = parse_qsl(encoded, keep_blank_values=True)
+        for name, value in form_items:
             points.append(
                 InsertionPoint(
                     location="body",
@@ -585,10 +618,32 @@ def infer_insertion_points(
                     source=source,
                 )
             )
+    elif normalized_type == "multipart/form-data" and isinstance(body, dict):
+        for name, value in sorted(body.items()):
+            points.append(
+                InsertionPoint(
+                    location="body",
+                    name=str(name),
+                    value=value,
+                    value_type=type(value).__name__,
+                    source=source,
+                    metadata={"multipart": True},
+                )
+            )
+    elif normalized_type == "text/plain" and body not in (None, "", b""):
+        points.append(
+            InsertionPoint(
+                location="body",
+                name="body",
+                value=body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body),
+                value_type="text",
+                source=source,
+            )
+        )
 
-    unique: Dict[str, InsertionPoint] = {}
+    unique: Dict[Tuple[str, str], InsertionPoint] = {}
     for point in points:
-        unique[point.id] = point
+        unique[_point_logical_key(point)] = point
     return [unique[key] for key in sorted(unique)]
 
 
