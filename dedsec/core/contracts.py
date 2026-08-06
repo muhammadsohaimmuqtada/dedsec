@@ -12,6 +12,11 @@ class ScanConfig:
     backoff: float = 0.5
     pool_connections: int = 20
     pool_maxsize: int = 40
+    module_retries: int = 1
+    retry_backoff_cap: float = 2.0
+    circuit_failure_threshold: int = 3
+    circuit_cooldown: float = 30.0
+    evidence_dir: Optional[str] = None
 
 
 @dataclass
@@ -38,6 +43,10 @@ class ModuleResult:
     output: str = ""
     error: Optional[str] = None
     data: Dict[str, Any] = field(default_factory=dict)
+    attempts: int = 1
+    started_at: Optional[str] = None
+    evidence_ids: List[str] = field(default_factory=list)
+    failure_class: Optional[str] = None
 
 
 @dataclass
