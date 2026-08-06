@@ -1,0 +1,60 @@
+target: https://example.com
+
+modules:
+  - dns
+  - ssl
+  - headers
+  - subdomains
+  - js
+  - ports
+  - security_policy
+
+scope:
+  include_subdomains: true
+  allowed_ports: [80, 443]
+  include_paths:
+    - "/*"
+  exclude_paths:
+    - "/logout"
+    - "/delete-account"
+
+discovery:
+  enabled: true
+  crawl_depth: 2
+  crawl_pages: 100
+  crawl_body_bytes: 1048576
+  javascript_candidates: true
+  browser: false
+  api_specs: []
+
+traffic:
+  timeout: 10
+  concurrency: 3
+  module_timeout: 120
+  global_timeout: 600
+  retries: 2
+  module_retries: 0
+  backoff: 0.5
+  max_requests: 1000
+  maximum_impact: active-safe
+
+project:
+  database: .dedsec/example.db
+  resume: false
+  diff: true
+
+templates:
+  directories:
+    - ./examples/templates
+  maximum_impact: active-safe
+  max_templates: 100
+
+# auth:
+#   file: ./examples/auth-profile.example.yml
+
+exports:
+  formats: [json, sarif, html]
+  directory: ./reports
+
+metadata:
+  purpose: authorized-research-example
