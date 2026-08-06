@@ -11,13 +11,21 @@ from dedsec.core.contracts import ModuleResult
 from dedsec.core.crawler import CrawlConfig, CrawlerEngine
 from dedsec.core.network_paths import probe_target_paths
 from dedsec.core.project_store import ProjectStore
-from dedsec.core.scan_plan import ScanPlan
+from dedsec.core.scan_plan import IMPACT_LEVELS, ScanPlan, impact_allowed
 from dedsec.core.templates import TemplateRepository, TemplateRunner
 from dedsec.core.workspace import Observation, ResearchWorkspace
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _lower_impact(first: str, second: str) -> str:
+    if first not in IMPACT_LEVELS:
+        raise ValueError("Unknown impact class: %s" % first)
+    if second not in IMPACT_LEVELS:
+        raise ValueError("Unknown impact class: %s" % second)
+    return first if IMPACT_LEVELS[first] <= IMPACT_LEVELS[second] else second
 
 
 @dataclass
@@ -92,7 +100,12 @@ class ResearchPipeline:
         audit_inputs: bool = False,
         audit_max_requests: int = 100,
         audit_max_insertion_points: int = 250,
+        maximum_impact: str = "active-safe",
     ) -> ResearchPipelineResult:
+        maximum_impact = str(maximum_impact or "active-safe").lower()
+        if maximum_impact not in IMPACT_LEVELS:
+            raise ValueError("Unknown maximum impact class: %s" % maximum_impact)
+
         if plan is not None:
             deep = bool(deep or plan.discovery.enabled)
             auth_file = auth_file or plan.auth_file
@@ -107,13 +120,28 @@ class ResearchPipeline:
                 crawl_pages = plan.discovery.crawl_pages
             self.workspace.metadata["scan_plan"] = plan.public_dict()
 
+        self.metadata["maximum_impact"] = maximum_impact
+        if (deep or browser or auth_file) and not impact_allowed("normal", maximum_impact):
+            raise ValueError(
+                "Deep discovery, browser discovery, and authentication require maximum impact normal or higher"
+            )
+        if audit_inputs and not impact_allowed("active-safe", maximum_impact):
+            raise ValueError("Input auditing requires maximum impact active-safe or higher")
+
         self._configure_project(project_path, resume)
         headers = self._configure_identity(auth_file)
 
-        self.metadata["network_paths"] = probe_target_paths(
-            self.context.target_url,
-            timeout=min(3.0, float(self.context.timeout)),
-        )
+        if impact_allowed("normal", maximum_impact):
+            self.metadata["network_paths"] = probe_target_paths(
+                self.context.target_url,
+                timeout=min(3.0, float(self.context.timeout)),
+            )
+        else:
+            self.metadata["network_paths"] = {
+                "status": "skipped",
+                "reason": "impact-policy",
+                "maximum_impact": maximum_impact,
+            }
         self.workspace.metadata["network_paths"] = self.metadata["network_paths"]
 
         if deep:
@@ -173,13 +201,15 @@ class ResearchPipeline:
             if expanded not in directories:
                 directories.append(expanded)
         if directories:
-            max_impact = plan.templates.maximum_impact if plan is not None else "active-safe"
+            template_impact = maximum_impact
+            if plan is not None:
+                template_impact = _lower_impact(template_impact, plan.templates.maximum_impact)
             max_templates = plan.templates.max_templates if plan is not None else 500
             definitions = TemplateRepository(directories, max_templates=max_templates).load()
             self.metadata["templates"] = TemplateRunner(
                 self.context,
                 self.workspace,
-                maximum_impact=max_impact,
+                maximum_impact=template_impact,
             ).run(definitions)
 
         if audit_inputs:
