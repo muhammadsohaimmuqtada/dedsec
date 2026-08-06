@@ -12,6 +12,43 @@ POLICY_FILES = [
 ]
 
 
+def _non_comment_lines(text):
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+
+
+def _looks_like_policy(path, text):
+    lines = _non_comment_lines(text)
+    if not lines:
+        return False
+
+    lower_lines = [line.lower() for line in lines]
+    if "security.txt" in path:
+        return any(line.startswith("contact:") for line in lower_lines)
+
+    if path.endswith("robots.txt"):
+        prefixes = ("user-agent:", "allow:", "disallow:", "sitemap:")
+        return any(line.startswith(prefixes) for line in lower_lines)
+
+    if path.endswith("ads.txt"):
+        for line in lines:
+            fields = [field.strip() for field in line.split(",")]
+            if len(fields) >= 3 and fields[2].upper() in {"DIRECT", "RESELLER"}:
+                return True
+        return False
+
+    if path.endswith("humans.txt"):
+        if any("<html" in line or "<!doctype" in line for line in lower_lines):
+            return False
+        prefixes = ("team:", "site:", "thanks:", "contact:", "technology:")
+        return any(line.startswith(prefixes) for line in lower_lines)
+
+    return False
+
+
 def run(url, domain, timeout=10):
     section("Security Policy & Disclosure Audit", "📄")
     results = {"policies_found": [], "security_txt_valid": False, "issues": []}
@@ -24,29 +61,21 @@ def run(url, domain, timeout=10):
 
         text = resp.text
         lower = text.lower()
-        if (
-            "contact:" in lower
-            or "allow:" in lower
-            or "disallow:" in lower
-            or "google.com" in lower
-            or "contact" in lower
-        ):
-            info("Found Policy File", f"{label} at {target}")
-            results["policies_found"].append({"label": label, "url": target})
+        if not _looks_like_policy(path, text):
+            continue
 
-            if "security.txt" in path:
-                if "contact:" in lower:
-                    results["security_txt_valid"] = True
-                    info("security.txt Contact", "Present")
-                else:
-                    warn("security.txt missing required 'Contact:' field!")
-                    results["issues"].append("security.txt missing Contact field")
+        info("Found Policy File", f"{label} at {target}")
+        results["policies_found"].append({"label": label, "url": target})
 
-                if "expires:" in lower:
-                    info("security.txt Expiration", "Policy expiry date declared")
-                else:
-                    warn("security.txt missing recommended 'Expires:' date field!")
-                    results["issues"].append("security.txt missing Expires field")
+        if "security.txt" in path:
+            results["security_txt_valid"] = True
+            info("security.txt Contact", "Present")
+
+            if "expires:" in lower:
+                info("security.txt Expiration", "Policy expiry date declared")
+            else:
+                warn("security.txt missing recommended 'Expires:' date field!")
+                results["issues"].append("security.txt missing Expires field")
 
     if not results["policies_found"]:
         info(
