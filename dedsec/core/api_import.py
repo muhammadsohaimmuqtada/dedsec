@@ -239,7 +239,8 @@ class OpenAPIImporter:
             scheme = str(schemes[0])
             host = str(spec.get("host") or urlsplit(self.target_url).netloc)
             base_path = str(spec.get("basePath") or "/")
-            return "%s://%s%s" % (scheme, host, base_path.rstrip("/"))
+            base = urljoin("%s://%s/" % (scheme, host), base_path.lstrip("/"))
+            return base.rstrip("/") + "/"
         return self.target_url.rstrip("/") + "/"
 
     def _security_metadata(self, spec: Dict[str, Any]) -> Dict[str, Any]:
