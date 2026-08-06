@@ -1,25 +1,78 @@
-# DEDSEC — Web Reconnaissance Framework
+# DEDSEC — Evidence-Driven Web Reconnaissance Framework
 
-[![Python](https://img.shields.io/badge/Python-3.8%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
+[![Version](https://img.shields.io/badge/version-1.2.0-4c8bf5?style=flat-square)](https://github.com/muhammadsohaimmuqtada/dedsec)
+[![Python](https://img.shields.io/badge/Python-3.8--3.12-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![CI](https://img.shields.io/github/actions/workflow/status/muhammadsohaimmuqtada/dedsec/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/muhammadsohaimmuqtada/dedsec/actions)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-DEDSEC is a modular reconnaissance framework for authorized web security testing. It combines discovery, service profiling, web-configuration analysis, endpoint extraction, evidence capture, and structured reporting in a single CLI.
+DEDSEC is a modular reconnaissance framework for **authorized web security testing**. It combines attack-surface discovery, service profiling, web-configuration analysis, endpoint extraction, evidence capture, and structured reporting in a single CLI.
 
-The v2 architecture is moving DEDSEC toward an evidence-driven runtime: scanner output is preserved as evidence, heuristic signals remain candidates until they satisfy verification rules, and machine-readable reports distinguish observations from verified findings.
+The 1.2 release line establishes the v2 runtime foundation: bounded execution, explicit scope policy, shared request budgeting, evidence-aware findings, and a migration path from independent scanner modules toward a coordinated reconnaissance engine.
+
+## Project status
+
+| Component | Current state |
+| --- | --- |
+| Package version | `1.2.0` |
+| Built-in modules | `24` |
+| Report schema | `2.0` |
+| Supported Python | `3.8`–`3.12` |
+| Execution | Bounded concurrent orchestration |
+| Evidence | Scan IDs, SHA-256 evidence references, redaction, optional artifacts |
+| Finding model | Observation → candidate/hypothesis → verified finding |
+| Runtime migration | Foundation merged; bundled modules migrating incrementally |
+| CI | Ruff + unittest matrix + package/CLI checks |
 
 ## Highlights
 
 - 24 built-in reconnaissance and security-posture modules
 - bounded concurrent module execution
-- HTTP connection pooling and retry controls
 - per-module and global timeout controls
+- centralized v2 scope and request-budget foundation
+- HTTP connection pooling and retry controls
 - evidence IDs, sensitive-value redaction, and optional evidence artifacts
 - versioned JSON report schema
 - observation → candidate → verified-finding correlation model
-- runtime scope and request-budget foundation for migrated modules
 - Rich terminal summaries
-- CI with Ruff and unit tests
+- supported-Python CI matrix and repository quality gates
+
+## Architecture
+
+```text
+Target
+  │
+  ▼
+ScanContext
+  ├── ScopePolicy
+  ├── request budget
+  ├── evidence identity
+  └── shared transport
+          │
+          ▼
+     Orchestrator
+          │
+     ┌────┼──────────────┐
+     ▼    ▼              ▼
+  legacy runtime-aware  future
+  modules modules        schedulers
+     │       │
+     └───┬───┘
+         ▼
+   Module results
+         │
+         ▼
+Evidence + correlation
+         │
+         ▼
+Observation → candidate → verified finding
+         │
+         ▼
+JSON report schema 2.0
+```
+
+Existing modules remain compatible with `run(url, domain, timeout)`. New and migrated modules can use `run_with_context(context)` to consume shared scope, request-budget, evidence, and transport state.
+
+See [`docs/CORE_RUNTIME_PLAN.md`](docs/CORE_RUNTIME_PLAN.md), [`docs/MODULE_AUTHORING.md`](docs/MODULE_AUTHORING.md), and [`docs/v2-evidence-model.md`](docs/v2-evidence-model.md).
 
 ## Modules
 
@@ -66,7 +119,7 @@ python -m pip install -e '.[dev]'
 
 ## Usage
 
-Run the full module set:
+Run the complete module set:
 
 ```bash
 dedsec https://example.com
@@ -125,45 +178,62 @@ python -m dedsec https://example.com
 
 ## Evidence and reporting
 
-DEDSEC's report schema separates module execution from security conclusions. A scan can contain:
+DEDSEC separates collection from security conclusions. A scan may contain:
 
-- **observations** — facts collected by modules
-- **hypotheses / candidates** — security-relevant signals that still require verification
-- **verified findings** — findings promoted only when the detector provides verification semantics and evidence references
-- **rejected or unverified outcomes** — failed modules and signals that were not promoted
+- **observations** — facts collected by modules;
+- **candidates / hypotheses** — security-relevant signals that still require verification;
+- **verified findings** — findings promoted only when verification semantics and evidence references exist;
+- **rejected or unverified outcomes** — failed, inconclusive, or deliberately unpromoted results.
 
-Evidence records include a scan ID, module provenance, timestamp, SHA-256 digest, redacted structured data, and an optional atomic JSON artifact. Sensitive-looking values are redacted before report/evidence output.
-
-See [the v2 evidence model](docs/v2-evidence-model.md) and [the core runtime plan](docs/CORE_RUNTIME_PLAN.md).
+Evidence records include scan identity, module provenance, timestamps, SHA-256 digests, redacted structured data, and optional atomic JSON artifacts. Sensitive-looking values are redacted before report/evidence output.
 
 ## Runtime direction
 
-The current CLI remains compatible with the existing `run(url, domain, timeout)` module contract. Runtime-aware modules can opt into a shared scan context containing target scope, request budget, evidence state, and centralized transport. This lets DEDSEC migrate its built-in modules incrementally without a risky all-at-once rewrite.
+DEDSEC 1.2 is a compatibility foundation rather than a cosmetic version bump. The core runtime now supports explicit scope decisions and shared request budgets while the existing 24 modules continue to run.
 
-The next runtime stages are request-level evidence, normalized asset/endpoint stores, and dependency-aware scheduling so discoveries can be reused across modules instead of rediscovered independently.
+The planned migration sequence is:
 
-## Development
+1. migrate noisy/high-value detectors to shared transport and candidate semantics;
+2. add request-level evidence;
+3. normalize discovered assets and API endpoints;
+4. introduce dependency-aware scheduling so discoveries can be reused across modules;
+5. add persistent scan workspaces and attack-surface diffing.
 
-Run lint and tests before opening a pull request:
+## Development and contribution
+
+Install development dependencies and run:
 
 ```bash
 ruff check .
 python -m unittest discover -s tests -v
+python -m compileall -q dedsec tests
 ```
 
-Project contributions should keep network behavior bounded, avoid sensitive data in fixtures and output, and distinguish heuristic candidates from verified findings. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions must keep network behavior bounded, protect sensitive data, respect runtime scope, and distinguish heuristic candidates from verified findings. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before proposing scanner or architecture changes.
+
+## Repository standards
+
+DEDSEC maintains explicit project policies for technical and security collaboration:
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — engineering, testing, evidence, runtime, and pull-request standards
+- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — professional community and security-research conduct
+- [`SECURITY.md`](SECURITY.md) — supported versions and coordinated vulnerability disclosure
+- [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) — required quality review for code changes
+- [`.github/ISSUE_TEMPLATE/bug_report.md`](.github/ISSUE_TEMPLATE/bug_report.md) — structured bug reporting
 
 ## Security
 
-Security issues in DEDSEC itself should be reported according to [SECURITY.md](SECURITY.md). Findings discovered against third-party systems should be disclosed through the target owner's authorized process.
+Security issues **in DEDSEC itself** should be handled according to [`SECURITY.md`](SECURITY.md), not through a public issue containing exploit details or sensitive evidence.
 
-## Legal
+Findings discovered against third-party systems should be disclosed through the target owner's authorized vulnerability-disclosure or bug-bounty process.
 
-DEDSEC is intended for systems you own or have explicit authorization to test. You are responsible for complying with the scope and rules of any security-testing or bug-bounty program you participate in.
+## Legal and authorized use
+
+DEDSEC is intended for systems you own or have explicit authorization to test. You are responsible for complying with the written scope, testing rules, request limits, and disclosure requirements of any organization or bug-bounty program you assess.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [`LICENSE`](LICENSE).
 
 ## Author
 
