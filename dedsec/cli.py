@@ -254,6 +254,9 @@ def scan(
     if audit_inputs and not impact_allowed("active-safe", max_impact):
         error("--audit-inputs requires --max-impact active-safe or higher")
         raise typer.Exit(code=2)
+    if (deep or browser or auth_file) and not impact_allowed("normal", max_impact):
+        error("Deep/browser/authenticated discovery requires --max-impact normal or higher")
+        raise typer.Exit(code=2)
     if resume and not project:
         error("--resume requires --project")
         raise typer.Exit(code=2)
@@ -373,6 +376,7 @@ def scan(
             audit_inputs=audit_inputs,
             audit_max_requests=audit_max_requests,
             audit_max_insertion_points=audit_max_points,
+            maximum_impact=max_impact,
         )
     except Exception as exc:
         if pipeline.project_store is not None:
