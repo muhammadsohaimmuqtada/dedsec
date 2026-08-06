@@ -2,7 +2,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from dedsec.core.evidence import redact_value
 from dedsec.core.workspace import ResearchWorkspace
@@ -16,7 +16,8 @@ class ProjectStore:
     """SQLite-backed project history for resume, diff, and cross-scan asset knowledge.
 
     Persistent snapshots are redacted before storage. Authentication material is
-    never intentionally stored in project history.
+    never intentionally stored in project history. Crash checkpoints are kept
+    separate from the completed-scan history used for longitudinal diffs.
     """
 
     SCHEMA_VERSION = 1
@@ -25,10 +26,16 @@ class ProjectStore:
         self.path = os.path.abspath(os.path.expanduser(path))
         directory = os.path.dirname(self.path) or "."
         os.makedirs(directory, exist_ok=True)
+        existed = os.path.exists(self.path)
         self._connection = sqlite3.connect(self.path, timeout=30.0)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA foreign_keys=ON")
         self._connection.execute("PRAGMA journal_mode=WAL")
+        if not existed:
+            try:
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
         self._initialize()
 
     def _initialize(self) -> None:
@@ -115,6 +122,9 @@ class ProjectStore:
         status: str = "complete",
         report: Optional[Dict[str, Any]] = None,
     ) -> None:
+        status = str(status or "complete").lower()
+        if status not in {"complete", "checkpoint"}:
+            raise ValueError("Project scan status must be complete or checkpoint")
         raw_snapshot = workspace.snapshot()
         snapshot = redact_value(raw_snapshot)
         if not isinstance(snapshot, dict):
@@ -229,25 +239,22 @@ class ProjectStore:
         self,
         domain: str,
         exclude_scan_id: Optional[str] = None,
+        statuses: Sequence[str] = ("complete",),
     ) -> Optional[Dict[str, Any]]:
+        normalized_statuses = tuple(str(item).lower() for item in statuses if str(item).strip())
+        if not normalized_statuses:
+            raise ValueError("At least one project scan status is required")
+        if any(item not in {"complete", "checkpoint"} for item in normalized_statuses):
+            raise ValueError("Unsupported project scan status filter")
+        placeholders = ",".join("?" for _ in normalized_statuses)
+        params: List[Any] = [domain.lower().rstrip(".")]
+        sql = "SELECT workspace_json FROM scans WHERE domain=? AND status IN (%s)" % placeholders
+        params.extend(normalized_statuses)
         if exclude_scan_id:
-            row = self._connection.execute(
-                """
-                SELECT workspace_json FROM scans
-                WHERE domain=? AND scan_id<>?
-                ORDER BY created_at DESC LIMIT 1
-                """,
-                (domain.lower().rstrip("."), exclude_scan_id),
-            ).fetchone()
-        else:
-            row = self._connection.execute(
-                """
-                SELECT workspace_json FROM scans
-                WHERE domain=?
-                ORDER BY created_at DESC LIMIT 1
-                """,
-                (domain.lower().rstrip("."),),
-            ).fetchone()
+            sql += " AND scan_id<>?"
+            params.append(exclude_scan_id)
+        sql += " ORDER BY created_at DESC, scan_id DESC LIMIT 1"
+        row = self._connection.execute(sql, tuple(params)).fetchone()
         if row is None:
             return None
         return json.loads(row["workspace_json"])
@@ -257,7 +264,7 @@ class ProjectStore:
             """
             SELECT workspace_json FROM scans
             WHERE domain=? AND status='checkpoint'
-            ORDER BY created_at DESC LIMIT 1
+            ORDER BY created_at DESC, scan_id DESC LIMIT 1
             """,
             (domain.lower().rstrip("."),),
         ).fetchone()
@@ -270,7 +277,7 @@ class ProjectStore:
             rows = self._connection.execute(
                 """
                 SELECT scan_id, target_url, domain, created_at, status
-                FROM scans WHERE domain=? ORDER BY created_at DESC LIMIT ?
+                FROM scans WHERE domain=? ORDER BY created_at DESC, scan_id DESC LIMIT ?
                 """,
                 (domain.lower().rstrip("."), max(1, int(limit))),
             ).fetchall()
@@ -278,12 +285,16 @@ class ProjectStore:
             rows = self._connection.execute(
                 """
                 SELECT scan_id, target_url, domain, created_at, status
-                FROM scans ORDER BY created_at DESC LIMIT ?
+                FROM scans ORDER BY created_at DESC, scan_id DESC LIMIT ?
                 """,
                 (max(1, int(limit)),),
             ).fetchall()
         return [dict(row) for row in rows]
 
     def diff_workspace(self, workspace: ResearchWorkspace) -> Dict[str, Any]:
-        previous = self.latest_workspace(workspace.domain, exclude_scan_id=workspace.scan_id)
+        previous = self.latest_workspace(
+            workspace.domain,
+            exclude_scan_id=workspace.scan_id,
+            statuses=("complete",),
+        )
         return workspace.diff(previous)
