@@ -1,4 +1,5 @@
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock, patch
 
 import requests
@@ -67,6 +68,24 @@ class CoreUtilsTests(unittest.TestCase):
             result = utils.safe_request("https://outside.test/")
         self.assertIsNone(result)
         self.assertEqual(request_mock.call_count, 0)
+        context.close()
+
+    @patch("requests.Session.request")
+    def test_bound_context_is_visible_to_module_worker_threads(self, request_mock):
+        response = Mock(spec=requests.Response)
+        response.status_code = 200
+        response.headers = {}
+        request_mock.return_value = response
+        context = ScanContext.build("https://example.com", "example.com", max_requests=5)
+        utils.bind_scan_context(context, retries=0)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(
+                utils.safe_request,
+                "https://example.com/threaded",
+                cache=False,
+            ).result()
+        self.assertIsNotNone(result)
+        self.assertEqual(context.request_budget.requests_used, 1)
         context.close()
 
     @patch("requests.Session.request")
