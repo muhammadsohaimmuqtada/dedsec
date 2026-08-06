@@ -35,10 +35,15 @@ def run(url, domain, timeout=10):
         "ip_tested": None,
         "transport_failures": 0,
         "probe_scheme": "http",
+        "partial": False,
+        "inconclusive": False,
     }
     ip = cached_resolve_ipv4(domain)
     if not ip:
         warn(f"Could not resolve target IP for {domain}.")
+        results["inconclusive"] = True
+        results["error"] = "Could not resolve target IP"
+        results["failure_class"] = "dns"
         return results
     results["ip_tested"] = ip
     info("Target IP Address", ip)
@@ -57,6 +62,9 @@ def run(url, domain, timeout=10):
     if base_response is None:
         warn("Could not obtain an in-scope HTTP baseline; vhost discovery is inconclusive.")
         results["transport_failures"] += 1
+        results["inconclusive"] = True
+        results["error"] = "Could not obtain in-scope HTTP baseline"
+        results["failure_class"] = "target_transport"
         return results
     baseline = _signature(base_response)
 
@@ -100,6 +108,12 @@ def run(url, domain, timeout=10):
     candidates.sort(key=lambda item: item["vhost"])
     results["candidates"] = candidates
     results["vhosts_found"] = candidates
+    if results["transport_failures"]:
+        results["partial"] = True
+        results["error"] = (
+            f"{results['transport_failures']} Host-header probe(s) failed at transport level"
+        )
+        results["failure_class"] = "partial_transport"
     if candidates:
         print(f"\n{Colors.YELLOW}[!]{Colors.RESET} {Colors.BOLD}VHost Response-Difference Candidates:{Colors.RESET}")
         for item in candidates:
@@ -107,6 +121,6 @@ def run(url, domain, timeout=10):
                 f"Candidate {item['vhost']}: status {item['status']} vs {item['base_status']}, "
                 f"length {item['length']} vs {item['base_length']} (not DNS/ownership verified)"
             )
-    else:
+    elif not results["partial"]:
         info("VHost Check", f"{Colors.GREEN}No distinct Host-header responses identified on {domain}{Colors.RESET}")
     return results
