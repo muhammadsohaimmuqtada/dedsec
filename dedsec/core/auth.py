@@ -25,12 +25,52 @@ _SECRET_KEYS = {
     "cookie",
     "cookies",
 }
+_AUTH_KINDS = {"headers", "basic", "bearer", "api_key", "cookie", "workflow"}
+_TOP_LEVEL_KEYS = {
+    "label",
+    "name",
+    "kind",
+    "type",
+    "role",
+    "tenant",
+    "headers",
+    "cookies",
+    "username",
+    "password",
+    "token",
+    "api_key_name",
+    "api_key_value",
+    "api_key_location",
+    "workflow",
+    "verification",
+    "metadata",
+}
+_WORKFLOW_KEYS = {
+    "method",
+    "url",
+    "headers",
+    "form",
+    "json",
+    "timeout",
+    "follow_redirects",
+    "expect_status",
+    "capture",
+}
+_VERIFICATION_KEYS = {
+    "url",
+    "timeout",
+    "expect_status",
+    "body_regex",
+    "logged_out_regex",
+}
+_CAPTURE_KEYS = {"header", "regex", "group"}
 
 
 def _load_structured_file(path: str) -> Dict[str, Any]:
-    with open(os.path.expanduser(path), "r", encoding="utf-8") as handle:
+    expanded = os.path.abspath(os.path.expanduser(path))
+    with open(expanded, "r", encoding="utf-8") as handle:
         text = handle.read()
-    if path.lower().endswith(".json"):
+    if expanded.lower().endswith(".json"):
         data = json.loads(text)
     else:
         if yaml is None:
@@ -39,6 +79,35 @@ def _load_structured_file(path: str) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("Authentication profile must contain an object at the top level")
     return data
+
+
+def _reject_unknown(mapping: Any, allowed: set, label: str) -> None:
+    if not isinstance(mapping, dict):
+        raise ValueError("%s must be an object" % label)
+    unknown = sorted(str(key) for key in mapping if str(key) not in allowed)
+    if unknown:
+        raise ValueError("Unknown %s key(s): %s" % (label, ", ".join(unknown)))
+
+
+def _status_values(value: Any, label: str) -> List[int]:
+    values = value if isinstance(value, list) else [value]
+    result = []
+    for item in values:
+        try:
+            code = int(item)
+        except (TypeError, ValueError):
+            raise ValueError("%s contains an invalid HTTP status" % label)
+        if code < 100 or code > 599:
+            raise ValueError("%s contains an invalid HTTP status" % label)
+        result.append(code)
+    return result
+
+
+def _compile_regex(value: Any, label: str):
+    try:
+        return re.compile(str(value), re.S)
+    except re.error as exc:
+        raise ValueError("Invalid %s regex: %s" % (label, exc))
 
 
 def _public_metadata(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -90,32 +159,83 @@ class AuthProfile:
     @classmethod
     def load(cls, path: str) -> "AuthProfile":
         raw = _load_structured_file(path)
+        _reject_unknown(raw, _TOP_LEVEL_KEYS, "authentication-profile")
+        headers = raw.get("headers") or {}
+        cookies = raw.get("cookies") or {}
+        workflow = raw.get("workflow") or []
+        verification = raw.get("verification") or {}
+        metadata = raw.get("metadata") or {}
+        if not isinstance(headers, dict):
+            raise ValueError("Authentication headers must be an object")
+        if not isinstance(cookies, dict):
+            raise ValueError("Authentication cookies must be an object")
+        if not isinstance(workflow, list):
+            raise ValueError("Authentication workflow must be a list")
+        if not isinstance(verification, dict):
+            raise ValueError("Authentication verification must be an object")
+        if not isinstance(metadata, dict):
+            raise ValueError("Authentication metadata must be an object")
+        _reject_unknown(verification, _VERIFICATION_KEYS, "verification")
+
+        for index, step in enumerate(workflow):
+            if not isinstance(step, dict):
+                raise ValueError("Authentication workflow step %d must be an object" % (index + 1))
+            _reject_unknown(step, _WORKFLOW_KEYS, "workflow[%d]" % index)
+            method = str(step.get("method") or "GET").upper()
+            if method not in {"GET", "HEAD", "POST"}:
+                raise ValueError("Authentication workflow only supports GET, HEAD, and explicit POST steps")
+            if method in {"GET", "HEAD"} and (step.get("form") is not None or step.get("json") is not None):
+                raise ValueError("GET/HEAD authentication steps cannot declare form or json bodies")
+            if step.get("form") is not None and step.get("json") is not None:
+                raise ValueError("Authentication workflow step cannot contain both form and json")
+            if step.get("timeout") is not None and float(step["timeout"]) <= 0:
+                raise ValueError("Authentication workflow timeout must be positive")
+            if step.get("expect_status") is not None:
+                _status_values(step["expect_status"], "workflow[%d].expect_status" % index)
+            capture = step.get("capture") or {}
+            if not isinstance(capture, dict):
+                raise ValueError("workflow[%d].capture must be an object" % index)
+            for variable, rule in capture.items():
+                if not str(variable).strip():
+                    raise ValueError("Workflow capture variable names cannot be empty")
+                _reject_unknown(rule, _CAPTURE_KEYS, "workflow[%d].capture.%s" % (index, variable))
+                if bool(rule.get("header")) == bool(rule.get("regex")):
+                    raise ValueError("Capture rules must declare exactly one of header or regex")
+                if rule.get("regex"):
+                    compiled = _compile_regex(rule["regex"], "workflow capture")
+                    group = int(rule.get("group", 1))
+                    if group < 0 or group > compiled.groups:
+                        raise ValueError("Workflow capture group is outside the regex group range")
+
+        if verification.get("timeout") is not None and float(verification["timeout"]) <= 0:
+            raise ValueError("Authentication verification timeout must be positive")
+        if verification.get("expect_status") is not None:
+            _status_values(verification["expect_status"], "verification.expect_status")
+        for key in ("body_regex", "logged_out_regex"):
+            if verification.get(key):
+                _compile_regex(verification[key], "verification.%s" % key)
+
         profile = cls(
             label=str(raw.get("label") or raw.get("name") or "authenticated"),
             kind=str(raw.get("kind") or raw.get("type") or "headers").lower(),
             role=raw.get("role"),
             tenant=raw.get("tenant"),
-            headers={str(k): str(v) for k, v in (raw.get("headers") or {}).items()},
-            cookies={str(k): str(v) for k, v in (raw.get("cookies") or {}).items()},
+            headers={str(k): str(v) for k, v in headers.items()},
+            cookies={str(k): str(v) for k, v in cookies.items()},
             username=raw.get("username"),
             password=raw.get("password"),
             token=raw.get("token"),
             api_key_name=raw.get("api_key_name"),
             api_key_value=raw.get("api_key_value"),
             api_key_location=str(raw.get("api_key_location") or "header").lower(),
-            workflow=list(raw.get("workflow") or []),
-            verification=dict(raw.get("verification") or {}),
-            metadata=_public_metadata(raw.get("metadata") or {}),
+            workflow=[dict(item) for item in workflow],
+            verification=dict(verification),
+            metadata=_public_metadata(metadata),
         )
-        if profile.kind not in {
-            "headers",
-            "basic",
-            "bearer",
-            "api_key",
-            "cookie",
-            "workflow",
-        }:
+        if profile.kind not in _AUTH_KINDS:
             raise ValueError("Unsupported authentication profile kind: %s" % profile.kind)
+        if profile.api_key_location not in {"header"}:
+            raise ValueError("Only header API keys are supported by the shared auth context")
         return profile
 
 
@@ -152,10 +272,7 @@ class AuthManager:
         elif profile.kind == "api_key":
             if not profile.api_key_name or profile.api_key_value is None:
                 raise ValueError("API-key authentication requires api_key_name and api_key_value")
-            if profile.api_key_location == "header":
-                headers[profile.api_key_name] = profile.api_key_value
-            else:
-                raise ValueError("Only header API keys are supported by the shared auth context")
+            headers[profile.api_key_name] = profile.api_key_value
         cookies = dict(profile.cookies)
         if cookies:
             headers["Cookie"] = self._cookie_header(cookies)
@@ -169,14 +286,8 @@ class AuthManager:
         variables: Dict[str, str] = {}
         step_results: List[Dict[str, Any]] = []
         for index, raw_step in enumerate(profile.workflow):
-            if not isinstance(raw_step, dict):
-                raise ValueError("Authentication workflow step %d must be an object" % (index + 1))
             step = _substitute(raw_step, variables)
             method = str(step.get("method") or "GET").upper()
-            if method not in {"GET", "HEAD", "POST"}:
-                raise ValueError(
-                    "Authentication workflow only supports GET, HEAD, and explicit POST steps"
-                )
             target = urljoin(self.context.target_url, str(step.get("url") or "/"))
             decision = self.context.scope.check_url(target)
             if not decision.allowed:
@@ -187,8 +298,6 @@ class AuthManager:
             )
             form_data = step.get("form")
             json_data = step.get("json")
-            if form_data is not None and json_data is not None:
-                raise ValueError("Authentication workflow step cannot contain both form and json")
             outcome = self.transport.request(
                 method,
                 target,
@@ -205,8 +314,7 @@ class AuthManager:
             response = outcome.response
             expected = step.get("expect_status")
             if expected is not None:
-                expected_values = expected if isinstance(expected, list) else [expected]
-                expected_codes = {int(item) for item in expected_values}
+                expected_codes = set(_status_values(expected, "workflow expect_status"))
                 if response.status_code not in expected_codes:
                     raise RuntimeError(
                         "Authentication workflow step %d returned HTTP %d; expected %s"
@@ -214,21 +322,16 @@ class AuthManager:
                     )
 
             capture = step.get("capture") or {}
-            if capture:
-                if not isinstance(capture, dict):
-                    raise ValueError("capture must be an object")
-                for variable, rule in capture.items():
-                    if not isinstance(rule, dict):
-                        continue
-                    if rule.get("header"):
-                        header_value = response.headers.get(str(rule["header"]))
-                        if header_value is not None:
-                            variables[str(variable)] = str(header_value)
-                    elif rule.get("regex"):
-                        match = re.search(str(rule["regex"]), response.text, re.S)
-                        if match:
-                            group = int(rule.get("group", 1))
-                            variables[str(variable)] = str(match.group(group))
+            for variable, rule in capture.items():
+                if rule.get("header"):
+                    header_value = response.headers.get(str(rule["header"]))
+                    if header_value is not None:
+                        variables[str(variable)] = str(header_value)
+                elif rule.get("regex"):
+                    match = re.search(str(rule["regex"]), response.text, re.S)
+                    if match:
+                        group = int(rule.get("group", 1))
+                        variables[str(variable)] = str(match.group(group))
             step_results.append(
                 {
                     "index": index + 1,
@@ -272,8 +375,7 @@ class AuthManager:
             }
         response = outcome.response
         expected = verification.get("expect_status", [200])
-        expected_values = expected if isinstance(expected, list) else [expected]
-        status_ok = response.status_code in {int(item) for item in expected_values}
+        status_ok = response.status_code in set(_status_values(expected, "verification expect_status"))
         regex = verification.get("body_regex")
         body_ok = True if not regex else re.search(str(regex), response.text, re.S) is not None
         negative_regex = verification.get("logged_out_regex")
