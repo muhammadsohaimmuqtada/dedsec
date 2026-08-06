@@ -1,38 +1,79 @@
 ---
 name: Bug report
-about: Create a report to help us improve
-title: ''
-labels: ''
-assignees: ''
-
+about: Report a reproducible DEDSEC defect or incorrect scanner behavior
+title: "[bug] "
+labels: "bug"
+assignees: ""
 ---
 
-**Describe the bug**
-A clear and concise description of what the bug is.
+## Summary
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+Describe the problem clearly. If this is a security vulnerability in DEDSEC itself, **do not continue with a public issue**—follow `SECURITY.md` instead.
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+## DEDSEC environment
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+- DEDSEC version/commit:
+- Python version:
+- Operating system:
+- Installation method (`pip -e`, clone, other):
 
-**Desktop (please complete the following information):**
- - OS: [e.g. iOS]
- - Browser [e.g. chrome, safari]
- - Version [e.g. 22]
+## Command
 
-**Smartphone (please complete the following information):**
- - Device: [e.g. iPhone6]
- - OS: [e.g. iOS8.1]
- - Browser [e.g. stock browser, safari]
- - Version [e.g. 22]
+```bash
+# Paste the minimal command that reproduces the issue.
+# Remove credentials, cookies, tokens, private hosts, and customer data.
+```
 
-**Additional context**
-Add any other context about the problem here.
+## Modules and runtime options
+
+- Module(s):
+- `--timeout` / `--module-timeout` / `--global-timeout`:
+- `--concurrency`:
+- `--retries` / `--module-retries`:
+- `--max-requests` (if used):
+- `--root-only` (if used):
+- Evidence output enabled? yes/no
+
+## Expected behavior
+
+What should DEDSEC have done?
+
+## Actual behavior
+
+What happened instead? Include the exact status, finding classification, or error when useful.
+
+## Reproduction
+
+Provide the smallest reproducible sequence using a system you own, a local fixture, or another explicitly authorized target.
+
+1.
+2.
+3.
+
+## Signal-quality details
+
+If reporting a false positive or false negative, include:
+
+- the module and finding/candidate name;
+- why the result is incorrect;
+- the relevant **redacted** response characteristics or synthetic fixture;
+- whether a negative/control request produced different behavior.
+
+Do not post live secrets or private vulnerability evidence.
+
+## Logs / report excerpt
+
+```text
+Paste only the relevant redacted output here.
+```
+
+## Additional context
+
+Include anything else needed to reproduce the issue, such as proxy use, unusual DNS/TLS behavior, or whether it appears only under concurrency.
+
+### Checklist
+
+- [ ] I reproduced this on the latest release or current `main` when practical.
+- [ ] I removed credentials, cookies, tokens, private customer data, and unrelated target information.
+- [ ] This is an ordinary bug/false-positive report, not a private security vulnerability in DEDSEC itself.
+- [ ] The reproduction uses infrastructure I own or am authorized to test.

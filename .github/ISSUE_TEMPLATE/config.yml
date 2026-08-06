@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability in DEDSEC
+    url: https://github.com/muhammadsohaimmuqtada/dedsec/security/policy
+    about: Review the coordinated disclosure policy before reporting a security issue.
+  - name: Contribution guidance
+    url: https://github.com/muhammadsohaimmuqtada/dedsec/blob/main/CONTRIBUTING.md
+    about: Read the engineering, testing, evidence, and pull-request standards before proposing major changes.
