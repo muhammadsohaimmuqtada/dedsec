@@ -1,6 +1,6 @@
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from dedsec.core.evidence import EvidenceStore
 from dedsec.core.health import TargetHealth
@@ -50,7 +50,6 @@ class RequestBudget:
             self._requests_used = value
 
     def consume(self, amount: int = 1) -> bool:
-        """Atomically consume budget and return False when exhausted."""
         amount = max(1, int(amount))
         if self._shared_counter is not None:
             lock = self._shared_lock
@@ -84,13 +83,16 @@ class ScanContext:
     timeout: int = 10
     request_budget: RequestBudget = field(default_factory=RequestBudget)
     target_health: Optional[TargetHealth] = None
-    metadata: Dict[str, str] = field(default_factory=dict)
+    default_headers: Dict[str, str] = field(default_factory=dict)
+    identity_id: str = "identity-anonymous"
+    metadata: Dict[str, Any] = field(default_factory=dict)
     _transport: Any = field(default=None, init=False, repr=False)
     _transport_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
 
     def __post_init__(self):
         if self.target_health is None:
             self.target_health = TargetHealth(self.domain)
+        self.default_headers = {str(k): str(v) for k, v in self.default_headers.items()}
 
     def get_transport(
         self,
@@ -131,9 +133,24 @@ class ScanContext:
         include_subdomains: bool = True,
         health_failure_threshold: int = 2,
         health_cooldown_seconds: float = 15.0,
+        allowed_hosts: Optional[Iterable[str]] = None,
+        denied_hosts: Optional[Iterable[str]] = None,
+        allowed_ports: Optional[Iterable[int]] = None,
+        include_paths: Optional[Iterable[str]] = None,
+        exclude_paths: Optional[Iterable[str]] = None,
+        default_headers: Optional[Dict[str, str]] = None,
+        identity_id: str = "identity-anonymous",
     ) -> "ScanContext":
         evidence = EvidenceStore(artifact_dir=evidence_dir)
-        scope = ScopePolicy.from_root(domain, include_subdomains=include_subdomains)
+        scope = ScopePolicy.from_root(
+            domain,
+            allowed_hosts=allowed_hosts,
+            denied_hosts=denied_hosts,
+            allowed_ports=allowed_ports,
+            include_subdomains=include_subdomains,
+            include_paths=include_paths,
+            exclude_paths=exclude_paths,
+        )
         return cls(
             scan_id=evidence.scan_id,
             target_url=target_url,
@@ -147,4 +164,6 @@ class ScanContext:
                 failure_threshold=health_failure_threshold,
                 cooldown_seconds=health_cooldown_seconds,
             ),
+            default_headers=dict(default_headers or {}),
+            identity_id=identity_id,
         )

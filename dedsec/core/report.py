@@ -8,8 +8,9 @@ from dedsec.core.colors import Colors
 from dedsec.core.contracts import ModuleResult
 from dedsec.core.correlator import FindingsCorrelator
 from dedsec.core.evidence import EvidenceStore, redact_value
+from dedsec.core.workspace import ResearchWorkspace
 
-REPORT_SCHEMA_VERSION = "2.1"
+REPORT_SCHEMA_VERSION = "3.0"
 
 
 def _utc_now() -> str:
@@ -50,12 +51,17 @@ def build_report(
     evidence_store: Optional[EvidenceStore] = None,
     correlated: Optional[Dict[str, Any]] = None,
     runtime_metadata: Optional[Dict[str, Any]] = None,
+    workspace: Optional[ResearchWorkspace] = None,
+    project_diff: Optional[Dict[str, Any]] = None,
+    research_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     modules = module_results or []
     correlation = correlated if correlated is not None else FindingsCorrelator().correlate(modules)
-    return {
+    workspace_snapshot = workspace.snapshot() if workspace is not None else None
+    coverage = workspace_snapshot.get("coverage", {}) if workspace_snapshot else {}
+    report = {
         "schema_version": REPORT_SCHEMA_VERSION,
-        "scan_id": evidence_store.scan_id if evidence_store else None,
+        "scan_id": evidence_store.scan_id if evidence_store else (workspace.scan_id if workspace else None),
         "generated_at": _utc_now(),
         "target": {"url": url, "domain": domain},
         "runtime": redact_value(runtime_metadata or {}),
@@ -64,6 +70,9 @@ def build_report(
             "verified_findings": len(correlation.get("verified_findings", [])),
             "hypotheses": len(correlation.get("hypotheses", [])),
             "attack_surface_score": correlation.get("attack_surface_score", 0),
+            "assets": len(workspace_snapshot.get("assets", [])) if workspace_snapshot else 0,
+            "requests_discovered": coverage.get("requests_discovered", 0),
+            "insertion_points_discovered": coverage.get("insertion_points_discovered", 0),
         },
         "modules": [
             {
@@ -83,6 +92,13 @@ def build_report(
         "analysis": redact_value(correlation),
         "evidence": evidence_store.snapshot() if evidence_store else [],
     }
+    if workspace_snapshot is not None:
+        report["workspace"] = redact_value(workspace_snapshot)
+    if project_diff is not None:
+        report["project_diff"] = redact_value(project_diff)
+    if research_metadata:
+        report["research"] = redact_value(research_metadata)
+    return report
 
 
 def _write_json_atomic(path: str, payload: Dict[str, Any]) -> None:
@@ -116,6 +132,9 @@ def generate_report(
     evidence_store=None,
     correlated=None,
     runtime_metadata=None,
+    workspace=None,
+    project_diff=None,
+    research_metadata=None,
 ):
     report_data = build_report(
         url=url,
@@ -125,6 +144,9 @@ def generate_report(
         evidence_store=evidence_store,
         correlated=correlated,
         runtime_metadata=runtime_metadata,
+        workspace=workspace,
+        project_diff=project_diff,
+        research_metadata=research_metadata,
     )
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{Colors.BOLD}{Colors.CYAN}{'='*60}{Colors.RESET}")
@@ -148,6 +170,20 @@ def generate_report(
         f"{report_data['summary']['verified_findings']} verified | "
         f"{report_data['summary']['hypotheses']} hypotheses"
     )
+    if "workspace" in report_data:
+        coverage = report_data["workspace"].get("coverage", {})
+        print(
+            f"{Colors.GREEN}[+]{Colors.RESET} Surface:   "
+            f"{report_data['summary']['assets']} assets | "
+            f"{coverage.get('requests_discovered', 0)} requests | "
+            f"{coverage.get('insertion_points_discovered', 0)} insertion points"
+        )
+        if coverage.get("requests_discovered"):
+            print(
+                f"{Colors.GREEN}[+]{Colors.RESET} Coverage:  "
+                f"{coverage.get('request_audit_coverage', 0.0):.1%} request audit | "
+                f"{coverage.get('insertion_point_audit_coverage', 0.0):.1%} insertion-point audit"
+            )
     runtime = report_data.get("runtime", {})
     if "target_http_requests_used" in runtime:
         print(

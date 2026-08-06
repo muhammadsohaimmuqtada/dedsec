@@ -3,6 +3,8 @@ import json
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, Dict, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -29,12 +31,11 @@ class RequestOutcome:
 
     @property
     def ok(self) -> bool:
-        # HTTP error statuses remain valid transport responses.
         return self.response is not None and self.failure is None
 
 
 class TransportEngine:
-    """Scoped HTTP transport with exact budgeting, deadlines, and health feedback."""
+    """Scoped HTTP transport with exact budgeting, deadlines, auth context, and health feedback."""
 
     RETRYABLE_STATUS = {429, 500, 502, 503, 504}
     RETRYABLE_FAILURES = {"connect_timeout", "read_timeout", "timeout", "connection"}
@@ -87,6 +88,12 @@ class TransportEngine:
         port = parsed.port or default_port
         return scheme, host, port
 
+    def _merge_headers(self, headers: Optional[Dict[str, str]]) -> Dict[str, str]:
+        merged = {str(k): str(v) for k, v in getattr(self.context, "default_headers", {}).items()}
+        for key, value in (headers or {}).items():
+            merged[str(key)] = str(value)
+        return merged
+
     @classmethod
     def _cache_key(
         cls,
@@ -130,14 +137,40 @@ class TransportEngine:
             return RequestFailure("invalid_url", str(exc))
         return RequestFailure("request", str(exc))
 
-    def _sleep_backoff(self, completed_attempt: int, deadline: float) -> bool:
+    def _base_backoff(self, completed_attempt: int) -> float:
         if self.backoff <= 0:
-            return time.monotonic() < deadline
-        delay = self.backoff * (2 ** max(0, completed_attempt - 1))
+            return 0.0
+        return self.backoff * (2 ** max(0, completed_attempt - 1))
+
+    @staticmethod
+    def _retry_after_seconds(response: requests.Response) -> Optional[float]:
+        raw = response.headers.get("Retry-After")
+        if not raw:
+            return None
+        value = raw.strip()
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            pass
+        try:
+            moment = parsedate_to_datetime(value)
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=timezone.utc)
+            return max(0.0, (moment - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    def _sleep_retry(self, completed_attempt: int, deadline: float, response=None) -> bool:
+        delay = self._base_backoff(completed_attempt)
+        if response is not None and response.status_code in {429, 503}:
+            retry_after = self._retry_after_seconds(response)
+            if retry_after is not None:
+                delay = max(delay, retry_after)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
-        time.sleep(min(delay, remaining))
+        if delay > 0:
+            time.sleep(min(delay, remaining))
         return time.monotonic() < deadline
 
     def _request_one(
@@ -151,11 +184,7 @@ class TransportEngine:
         params: Any,
         json_body: Any,
     ) -> RequestOutcome:
-        """Execute one logical request under one total deadline.
-
-        ``timeout`` caps the whole request including retries and backoff. It is
-        not multiplied by the retry count.
-        """
+        """Execute one logical request under one total deadline."""
         max_attempts = 1 + (self.retries if method in {"GET", "HEAD"} else 0)
         started = time.monotonic()
         deadline = started + max(0.001, float(timeout))
@@ -190,7 +219,7 @@ class TransportEngine:
                     verify=self.verify_tls,
                 )
                 if response.status_code in self.RETRYABLE_STATUS and attempt < max_attempts:
-                    if not self._sleep_backoff(attempt, deadline):
+                    if not self._sleep_retry(attempt, deadline, response=response):
                         return RequestOutcome(
                             response,
                             None,
@@ -202,7 +231,7 @@ class TransportEngine:
             except Exception as exc:
                 last_failure = self._classify_exception(exc)
                 if last_failure.category in self.RETRYABLE_FAILURES and attempt < max_attempts:
-                    if self._sleep_backoff(attempt, deadline):
+                    if self._sleep_retry(attempt, deadline):
                         continue
                 return RequestOutcome(None, last_failure, time.monotonic() - started, attempt)
 
@@ -214,12 +243,6 @@ class TransportEngine:
         )
 
     def _is_health_endpoint(self, url: str) -> bool:
-        """Only the canonical target scheme/host/port may mutate shared health.
-
-        A failure on http://target:80 must not poison health for an explicitly
-        supplied https://target:443 target, and alternate service probes must
-        not open the root application's circuit.
-        """
         return self._endpoint_key(url) == self._health_endpoint
 
     def _health_short_circuit(self, url: str) -> Optional[RequestOutcome]:
@@ -265,6 +288,7 @@ class TransportEngine:
         enforce_scope: bool = True,
     ) -> RequestOutcome:
         method_upper = method.upper()
+        merged_headers = self._merge_headers(headers)
         if enforce_scope:
             decision = self.context.scope.check_url(url)
             if not decision.allowed:
@@ -283,7 +307,7 @@ class TransportEngine:
             method_upper,
             url,
             allow_redirects,
-            headers,
+            merged_headers,
             data,
             params,
             json_body,
@@ -338,7 +362,7 @@ class TransportEngine:
                 current_method,
                 current_url,
                 timeout=remaining,
-                headers=headers,
+                headers=merged_headers,
                 data=current_data,
                 params=params if redirect_index == 0 else None,
                 json_body=current_json,
@@ -394,6 +418,13 @@ class TransportEngine:
             time.monotonic() - started,
             total_attempts,
         )
+
+    def session_cookies(self) -> Dict[str, str]:
+        return {cookie.name: cookie.value for cookie in self._session.cookies}
+
+    def clear_cache(self) -> None:
+        with self._lock:
+            self._cache.clear()
 
     def close(self) -> None:
         self._session.close()

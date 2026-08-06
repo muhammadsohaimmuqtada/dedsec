@@ -79,6 +79,9 @@ def _runtime_spec(scan_context: Optional[ScanContext]) -> Optional[Dict[str, Any
         "domain": scan_context.domain,
         "timeout": scan_context.timeout,
         "max_requests": scan_context.request_budget.max_requests,
+        "default_headers": dict(scan_context.default_headers),
+        "identity_id": scan_context.identity_id,
+        "metadata": dict(scan_context.metadata),
         "scope": {
             "root_domain": scope.root_domain,
             "allowed_hosts": sorted(scope.allowed_hosts),
@@ -86,6 +89,8 @@ def _runtime_spec(scan_context: Optional[ScanContext]) -> Optional[Dict[str, Any
             "allowed_ports": sorted(scope.allowed_ports) if scope.allowed_ports is not None else None,
             "allowed_schemes": sorted(scope.allowed_schemes),
             "include_subdomains": scope.include_subdomains,
+            "include_paths": sorted(scope.include_paths),
+            "exclude_paths": sorted(scope.exclude_paths),
         },
         "health": {
             "failure_threshold": health.failure_threshold if health is not None else 2,
@@ -115,6 +120,8 @@ def _build_child_context(
         allowed_ports=set(spec["allowed_ports"]) if spec["allowed_ports"] is not None else None,
         allowed_schemes=set(spec["allowed_schemes"]),
         include_subdomains=spec["include_subdomains"],
+        include_paths=set(spec.get("include_paths") or []),
+        exclude_paths=set(spec.get("exclude_paths") or []),
     )
     evidence = EvidenceStore(scan_id=runtime_spec["scan_id"])
     budget = RequestBudget(
@@ -143,6 +150,9 @@ def _build_child_context(
         timeout=runtime_spec["timeout"],
         request_budget=budget,
         target_health=target_health,
+        default_headers=dict(runtime_spec.get("default_headers") or {}),
+        identity_id=str(runtime_spec.get("identity_id") or "identity-anonymous"),
+        metadata=dict(runtime_spec.get("metadata") or {}),
     )
 
 
