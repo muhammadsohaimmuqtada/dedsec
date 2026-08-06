@@ -11,7 +11,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from dedsec.core.contracts import ModuleResult, ScanConfig
 from dedsec.core.evidence import EvidenceStore
+from dedsec.core.health import TargetHealth
 from dedsec.core.module_contract import RUNTIME_ENTRYPOINT
+from dedsec.core.module_profiles import TARGET_HTTP_REQUIRED
 from dedsec.core.reliability import CircuitBreaker, RetryPolicy, classify_failure
 from dedsec.core.runtime import RequestBudget, ScanContext
 from dedsec.core.scope import ScopePolicy
@@ -71,6 +73,7 @@ def _runtime_spec(scan_context: Optional[ScanContext]) -> Optional[Dict[str, Any
     if scan_context is None:
         return None
     scope = scan_context.scope
+    health = scan_context.target_health
     return {
         "scan_id": scan_context.scan_id,
         "target_url": scan_context.target_url,
@@ -85,10 +88,24 @@ def _runtime_spec(scan_context: Optional[ScanContext]) -> Optional[Dict[str, Any
             "allowed_schemes": sorted(scope.allowed_schemes),
             "include_subdomains": scope.include_subdomains,
         },
+        "health": {
+            "failure_threshold": health.failure_threshold if health is not None else 2,
+            "cooldown_seconds": health.cooldown_seconds if health is not None else 15.0,
+        },
     }
 
 
-def _build_child_context(runtime_spec, shared_counter=None, shared_budget_lock=None):
+def _build_child_context(
+    runtime_spec,
+    shared_counter=None,
+    shared_budget_lock=None,
+    shared_health_state=None,
+    shared_health_failures=None,
+    shared_health_successes=None,
+    shared_health_last_failure=None,
+    shared_health_last_failure_at=None,
+    shared_health_lock=None,
+):
     if runtime_spec is None:
         return None
     spec = runtime_spec["scope"]
@@ -106,6 +123,18 @@ def _build_child_context(runtime_spec, shared_counter=None, shared_budget_lock=N
         shared_counter=shared_counter,
         shared_lock=shared_budget_lock,
     )
+    health_spec = runtime_spec.get("health", {})
+    target_health = TargetHealth(
+        runtime_spec["domain"],
+        failure_threshold=health_spec.get("failure_threshold", 2),
+        cooldown_seconds=health_spec.get("cooldown_seconds", 15.0),
+        shared_state=shared_health_state,
+        shared_failures=shared_health_failures,
+        shared_successes=shared_health_successes,
+        shared_last_failure=shared_health_last_failure,
+        shared_last_failure_at=shared_health_last_failure_at,
+        shared_lock=shared_health_lock,
+    )
     return ScanContext(
         scan_id=runtime_spec["scan_id"],
         target_url=runtime_spec["target_url"],
@@ -114,6 +143,7 @@ def _build_child_context(runtime_spec, shared_counter=None, shared_budget_lock=N
         evidence=evidence,
         timeout=runtime_spec["timeout"],
         request_budget=budget,
+        target_health=target_health,
     )
 
 
@@ -126,6 +156,12 @@ def _process_module_entry(
     runtime_spec,
     shared_counter=None,
     shared_budget_lock=None,
+    shared_health_state=None,
+    shared_health_failures=None,
+    shared_health_successes=None,
+    shared_health_last_failure=None,
+    shared_health_last_failure_at=None,
+    shared_health_lock=None,
 ):
     capture = io.StringIO()
     child_context = None
@@ -146,6 +182,12 @@ def _process_module_entry(
             runtime_spec,
             shared_counter=shared_counter,
             shared_budget_lock=shared_budget_lock,
+            shared_health_state=shared_health_state,
+            shared_health_failures=shared_health_failures,
+            shared_health_successes=shared_health_successes,
+            shared_health_last_failure=shared_health_last_failure,
+            shared_health_last_failure_at=shared_health_last_failure_at,
+            shared_health_lock=shared_health_lock,
         )
         if child_context is not None:
             bind_scan_context(
@@ -179,8 +221,28 @@ def _process_module_entry(
                         raw_data = module.run(url=url, domain=domain, timeout=config.timeout)
 
                     data = raw_data if isinstance(raw_data, dict) else {}
+                    if isinstance(raw_data, dict) and raw_data.get("inconclusive"):
+                        status = "inconclusive"
+                        error_message = str(
+                            raw_data.get("error") or "Module could not obtain enough target data"
+                        )
+                        failure_class = str(raw_data.get("failure_class") or "inconclusive")
+                        break
+                    if isinstance(raw_data, dict) and raw_data.get("partial"):
+                        status = "partial"
+                        error_message = str(raw_data.get("error") or "Module completed with partial data")
+                        failure_class = str(raw_data.get("failure_class") or "partial")
+                        break
                     if isinstance(raw_data, dict) and raw_data.get("error"):
                         error_message = str(raw_data["error"])
+                        if (
+                            child_context is not None
+                            and child_context.target_health is not None
+                            and child_context.target_health.should_short_circuit()
+                        ):
+                            status = "inconclusive"
+                            failure_class = "target_unreachable"
+                            break
                         failure_class = classify_failure(error_message)
                         breaker.record_failure()
                         if retry_policy.should_retry(attempt, failure_class):
@@ -197,6 +259,14 @@ def _process_module_entry(
                     break
                 except Exception as exc:
                     error_message = str(exc) or exc.__class__.__name__
+                    if (
+                        child_context is not None
+                        and child_context.target_health is not None
+                        and child_context.target_health.should_short_circuit()
+                    ):
+                        status = "inconclusive"
+                        failure_class = "target_unreachable"
+                        break
                     failure_class = classify_failure(error_message)
                     breaker.record_failure()
                     if retry_policy.should_retry(attempt, failure_class):
@@ -263,9 +333,38 @@ def run_modules(
     runtime_spec = _runtime_spec(scan_context)
     shared_counter = None
     shared_budget_lock = None
+    shared_health_state = None
+    shared_health_failures = None
+    shared_health_successes = None
+    shared_health_last_failure = None
+    shared_health_last_failure_at = None
+    shared_health_lock = None
+    scheduler_health = None
+
     if scan_context is not None:
         shared_counter = mp_context.Value("q", int(scan_context.request_budget.requests_used))
         shared_budget_lock = mp_context.Lock()
+        health = scan_context.target_health or TargetHealth(scan_context.domain)
+        health_snapshot = health.snapshot()
+        shared_health_state = mp_context.Value("i", int(health_snapshot["state_code"]))
+        shared_health_failures = mp_context.Value(
+            "i", int(health_snapshot["consecutive_failures"])
+        )
+        shared_health_successes = mp_context.Value("i", int(health_snapshot["successes"]))
+        shared_health_last_failure = mp_context.Value("i", int(health.last_failure_code))
+        shared_health_last_failure_at = mp_context.Value("d", float(health.last_failure_at))
+        shared_health_lock = mp_context.Lock()
+        scheduler_health = TargetHealth(
+            scan_context.domain,
+            failure_threshold=health.failure_threshold,
+            cooldown_seconds=health.cooldown_seconds,
+            shared_state=shared_health_state,
+            shared_failures=shared_health_failures,
+            shared_successes=shared_health_successes,
+            shared_last_failure=shared_health_last_failure,
+            shared_last_failure_at=shared_health_last_failure_at,
+            shared_lock=shared_health_lock,
+        )
 
     results: Dict[str, Any] = {}
     result_by_module: Dict[str, ModuleResult] = {}
@@ -288,7 +387,29 @@ def run_modules(
         if on_update:
             on_update(result)
 
+    def _skip_unreachable_http_module(module_key: str) -> bool:
+        if module_key not in TARGET_HTTP_REQUIRED or scheduler_health is None:
+            return False
+        if not scheduler_health.should_short_circuit():
+            return False
+        _, label = module_map[module_key]
+        _persist(
+            ModuleResult(
+                module=module_key,
+                label=label,
+                status="inconclusive",
+                duration=0.0,
+                error="Root target transport is currently unreachable; HTTP-dependent module skipped",
+                attempts=0,
+                started_at=None,
+                failure_class="target_unreachable",
+            )
+        )
+        return True
+
     def _start(module_key: str) -> None:
+        if _skip_unreachable_http_module(module_key):
+            return
         module_path, label = module_map[module_key]
         started_at = _utc_now()
         started = time.monotonic()
@@ -304,6 +425,12 @@ def run_modules(
                 runtime_spec,
                 shared_counter,
                 shared_budget_lock,
+                shared_health_state,
+                shared_health_failures,
+                shared_health_successes,
+                shared_health_last_failure,
+                shared_health_last_failure_at,
+                shared_health_lock,
             ),
             name="dedsec-%s" % module_key,
         )
@@ -465,6 +592,14 @@ def run_modules(
 
     if shared_counter is not None and scan_context is not None:
         scan_context.request_budget.set_used(int(shared_counter.value))
+    if scheduler_health is not None and scan_context is not None:
+        scan_context.target_health.sync_from_values(
+            int(shared_health_state.value),
+            int(shared_health_failures.value),
+            int(shared_health_successes.value),
+            int(shared_health_last_failure.value),
+            float(shared_health_last_failure_at.value),
+        )
 
     module_results = [
         result_by_module[module_key]
