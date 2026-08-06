@@ -43,24 +43,24 @@ def run(url, domain, timeout=10):
     results["ip_tested"] = ip
     info("Target IP Address", ip)
 
-    # Direct-IP Host-header probing is explicitly scoped to the already-resolved
-    # target IP. HTTP is used so TLS verification/SNI is never disabled or faked.
-    base_target = f"http://{ip}/"
+    # Keep the URL host in canonical scope so the shared v2 transport enforces
+    # target budget/scope. The Host header is varied while DNS still resolves the
+    # canonical target; no TLS verification is disabled or bypassed.
+    base_target = f"http://{domain}/"
     base_response = safe_request(
         base_target,
         headers={"Host": domain},
         timeout=timeout,
         allow_redirects=False,
         cache=False,
-        external_request=True,
     )
     if base_response is None:
-        warn("Could not obtain a direct-IP HTTP baseline; vhost discovery is inconclusive.")
+        warn("Could not obtain an in-scope HTTP baseline; vhost discovery is inconclusive.")
         results["transport_failures"] += 1
         return results
     baseline = _signature(base_response)
 
-    print(f"  Comparing bounded Host-header responses on {ip} for domain {domain}...")
+    print(f"  Comparing bounded Host-header responses for {domain} ({ip})...")
 
     def _test(prefix):
         vhost = f"{prefix}.{domain}"
@@ -70,7 +70,6 @@ def run(url, domain, timeout=10):
             timeout=timeout,
             allow_redirects=False,
             cache=False,
-            external_request=True,
         )
         if response is None:
             return {"vhost": vhost, "transport_failure": True}
@@ -109,5 +108,5 @@ def run(url, domain, timeout=10):
                 f"length {item['length']} vs {item['base_length']} (not DNS/ownership verified)"
             )
     else:
-        info("VHost Check", f"{Colors.GREEN}No distinct Host-header responses identified on {ip}{Colors.RESET}")
+        info("VHost Check", f"{Colors.GREEN}No distinct Host-header responses identified on {domain}{Colors.RESET}")
     return results
