@@ -7,7 +7,7 @@ from dedsec.core.plugin_manager import PluginManager
 
 class _EntryPoints:
     def select(self, **kwargs):
-        raise AssertionError("Entry-point enumeration should not occur without opt-in")
+        raise AssertionError("entry-point enumeration reached")
 
 
 class V201PluginPolicyTests(unittest.TestCase):
@@ -21,6 +21,7 @@ class V201PluginPolicyTests(unittest.TestCase):
             ):
                 self.assertEqual(manager.discover_entry_points(), 0)
         self.assertEqual(manager.get_registered_plugins(), {})
+        self.assertEqual(manager.diagnostics(), [])
 
     def test_explicit_false_overrides_environment_opt_in(self):
         manager = PluginManager()
@@ -30,6 +31,7 @@ class V201PluginPolicyTests(unittest.TestCase):
                 side_effect=AssertionError("explicit false must win"),
             ):
                 self.assertEqual(manager.discover_entry_points(enabled=False), 0)
+        self.assertEqual(manager.diagnostics(), [])
 
     def test_environment_opt_in_reaches_entry_point_enumeration(self):
         manager = PluginManager()
@@ -38,8 +40,11 @@ class V201PluginPolicyTests(unittest.TestCase):
                 "dedsec.core.plugin_manager.importlib_metadata.entry_points",
                 return_value=_EntryPoints(),
             ):
-                with self.assertRaisesRegex(AssertionError, "Entry-point enumeration"):
-                    manager.discover_entry_points()
+                self.assertEqual(manager.discover_entry_points(), 0)
+        diagnostics = manager.diagnostics()
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]["source"], "entry-points")
+        self.assertIn("entry-point enumeration reached", diagnostics[0]["error"])
 
     def test_discovery_api_errors_are_diagnostic_not_silent(self):
         manager = PluginManager()
