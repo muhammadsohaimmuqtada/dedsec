@@ -280,6 +280,9 @@ def scan(
 
 
 def main():
+    if "--version" in sys.argv[1:] and all(arg.startswith("-") for arg in sys.argv[1:]):
+        typer.echo(f"DEDSEC v{__version__}")
+        return
     typer.run(scan)
 
 
