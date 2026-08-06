@@ -1,6 +1,7 @@
 from urllib.parse import urljoin
+
 from dedsec.core.colors import Colors
-from dedsec.core.utils import safe_request, section, info, warn, error
+from dedsec.core.utils import info, safe_request, section
 
 SCHEMA_PATHS = [
     "/swagger.json",
@@ -14,56 +15,99 @@ SCHEMA_PATHS = [
     "/api/openapi.json",
     "/graphql",
 ]
+HTTP_METHOD_KEYS = {"get", "post", "put", "patch", "delete", "head", "options", "trace"}
+
 
 def run(url, domain, timeout=10):
     section("API & OpenAPI Schema Scanner", "📜")
-    results = {"schemas_found": [], "endpoints_extracted": []}
-
-    discovered_schemas = []
-    extracted_endpoints = []
+    results = {"schemas_found": [], "endpoints_extracted": [], "transport_failures": 0}
+    schemas = []
+    endpoints = {}
 
     for path in SCHEMA_PATHS:
         target = urljoin(url, path)
-        resp = safe_request(target, timeout=timeout)
-        if not resp or resp.status_code != 200:
+        response = safe_request(target, timeout=timeout, allow_redirects=False)
+        if response is None:
+            results["transport_failures"] += 1
+            continue
+        if response.status_code != 200:
             continue
 
-        # Try parsing JSON schema
         try:
-            data = resp.json()
-            if isinstance(data, dict) and ("swagger" in data or "openapi" in data or "paths" in data):
-                version = data.get("openapi") or data.get("swagger") or "Unknown"
-                title = data.get("info", {}).get("title", "API Schema")
-                
-                schema_info = {"url": target, "type": "OpenAPI/Swagger", "version": version, "title": title}
-                discovered_schemas.append(schema_info)
-                
-                # Parse paths and methods
-                paths = data.get("paths", {})
-                for ep, methods in paths.items():
-                    if isinstance(methods, dict):
-                        m_list = [m.upper() for m in methods.keys()]
-                        extracted_endpoints.append({"endpoint": ep, "methods": m_list})
+            data = response.json()
         except Exception:
-            # Check if Swagger UI HTML
-            if "swagger" in resp.text.lower() or "swagger-ui" in resp.text.lower():
-                discovered_schemas.append({"url": target, "type": "Swagger UI HTML", "version": "HTML"})
+            data = None
 
-    results["schemas_found"] = discovered_schemas
-    results["endpoints_extracted"] = extracted_endpoints
+        if isinstance(data, dict) and (
+            "openapi" in data or "swagger" in data or isinstance(data.get("paths"), dict)
+        ):
+            version = data.get("openapi") or data.get("swagger") or "Unknown"
+            schemas.append(
+                {
+                    "url": target,
+                    "type": "OpenAPI/Swagger",
+                    "version": version,
+                    "title": data.get("info", {}).get("title", "API Schema"),
+                    "classification": "surface-observation",
+                }
+            )
+            for endpoint, methods in data.get("paths", {}).items():
+                if not isinstance(methods, dict):
+                    continue
+                method_names = sorted(
+                    key.upper() for key in methods if key.lower() in HTTP_METHOD_KEYS
+                )
+                existing = endpoints.setdefault(endpoint, set())
+                existing.update(method_names)
+            continue
 
-    if discovered_schemas:
-        print(f"\n{Colors.GREEN}[+]{Colors.RESET} {Colors.BOLD}API Schemas Found:{Colors.RESET}")
-        for s in discovered_schemas:
-            warn(f"CONFIRMED SCHEMA: {s['type']} ({s.get('version', '')}) at {s['url']}")
+        body = (response.text or "")[:10000].lower()
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "swagger-ui" in body or "swagger ui" in body:
+            schemas.append(
+                {
+                    "url": target,
+                    "type": "Swagger UI HTML",
+                    "version": "HTML",
+                    "classification": "surface-observation",
+                }
+            )
+        elif path == "/graphql" and (
+            "graphql" in body or "application/graphql" in content_type
+        ):
+            schemas.append(
+                {
+                    "url": target,
+                    "type": "GraphQL candidate",
+                    "version": None,
+                    "classification": "surface-observation",
+                }
+            )
 
-    if extracted_endpoints:
-        info("API Endpoints Mapped from Schema", str(len(extracted_endpoints)))
-        for ep in extracted_endpoints[:15]:
-            print(f"       {Colors.CYAN}\u2022 {ep['endpoint']} [{', '.join(ep['methods'])}]{Colors.RESET}")
-        if len(extracted_endpoints) > 15:
-            print(f"       {Colors.DIM}... and {len(extracted_endpoints) - 15} more endpoints{Colors.RESET}")
-    elif not discovered_schemas:
-        info("API Schema Audit", f"{Colors.DIM}No public OpenAPI / Swagger schemas detected.{Colors.RESET}")
+    # URL is part of the schema identity, while endpoints are globally deduped.
+    seen_schema = set()
+    deduped_schemas = []
+    for schema in schemas:
+        key = (schema["url"], schema["type"], schema.get("version"))
+        if key not in seen_schema:
+            seen_schema.add(key)
+            deduped_schemas.append(schema)
 
+    extracted = [
+        {"endpoint": endpoint, "methods": sorted(methods)}
+        for endpoint, methods in sorted(endpoints.items())
+    ]
+    results["schemas_found"] = deduped_schemas
+    results["endpoints_extracted"] = extracted
+
+    if deduped_schemas:
+        print(f"\n{Colors.GREEN}[+]{Colors.RESET} {Colors.BOLD}Public API Schema Surfaces:{Colors.RESET}")
+        for schema in deduped_schemas:
+            info(schema["type"], schema["url"])
+    if extracted:
+        info("Unique API Endpoints Mapped", str(len(extracted)))
+        for endpoint in extracted[:15]:
+            print(f"       {Colors.CYAN}• {endpoint['endpoint']} [{', '.join(endpoint['methods'])}]{Colors.RESET}")
+    elif not deduped_schemas:
+        info("API Schema Audit", f"{Colors.DIM}No public OpenAPI / Swagger schema detected.{Colors.RESET}")
     return results

@@ -1,23 +1,29 @@
 from dedsec.core.colors import Colors
-from dedsec.core.utils import safe_request, section, info, warn, error
+from dedsec.core.utils import error, info, safe_request, section, warn
+
 
 def run(url, domain, timeout=10):
-    section("Clickjacking embedding test", "🖼️")
-    results = {"findings": [], "xfo_header": None, "csp_frame_ancestors": None, "vulnerable": False}
+    section("Clickjacking Framing Posture", "🖼️")
+    results = {
+        "findings": [],
+        "observations": [],
+        "xfo_header": None,
+        "csp_frame_ancestors": None,
+        "protected": False,
+        "vulnerable": False,
+    }
 
-    resp = safe_request(url, timeout=timeout)
-    if not resp:
-        error("Could not fetch target to check clickjacking.")
+    response = safe_request(url, timeout=timeout)
+    if response is None:
+        error("Could not fetch target to check framing posture.")
+        results["error"] = "Could not fetch target"
         return results
 
-    headers_lower = {k.lower(): v for k, v in resp.headers.items()}
-    
-    # Check X-Frame-Options
-    xfo = headers_lower.get("x-frame-options")
+    headers = {key.lower(): value for key, value in response.headers.items()}
+    xfo = headers.get("x-frame-options")
     results["xfo_header"] = xfo
 
-    # Check CSP frame-ancestors directive
-    csp = headers_lower.get("content-security-policy", "")
+    csp = headers.get("content-security-policy", "")
     frame_ancestors = None
     for directive in csp.split(";"):
         directive = directive.strip().lower()
@@ -26,48 +32,52 @@ def run(url, domain, timeout=10):
             break
     results["csp_frame_ancestors"] = frame_ancestors
 
-    if xfo:
-        info("X-Frame-Options Header", xfo)
-    if frame_ancestors:
-        info("CSP frame-ancestors Directive", frame_ancestors)
-
-    # Clickjacking protection logic
     protected = False
-    
-    # 1. Check CSP first (modern browsers prefer frame-ancestors)
     if frame_ancestors:
-        parts = frame_ancestors.split()
-        sources = parts[1:]
+        info("CSP frame-ancestors", frame_ancestors)
+        sources = frame_ancestors.split()[1:]
         if "'none'" in sources or "'self'" in sources:
             protected = True
-            info("Clickjacking Protection", f"{Colors.GREEN}SECURE (enforced by CSP frame-ancestors){Colors.RESET}")
         else:
-            warn(f"CSP frame-ancestors allows framing: {', '.join(sources)}")
-            results["findings"].append({
-                "severity": "LOW",
-                "issue": f"CSP frame-ancestors is permissive: {frame_ancestors}"
-            })
+            results["observations"].append(
+                {
+                    "type": "framing-policy",
+                    "result": "permissive-csp",
+                    "value": frame_ancestors,
+                    "note": "Permissive framing policy observed; UI impact was not demonstrated.",
+                }
+            )
 
-    # 2. Check XFO as fallback
-    if not protected:
-        if xfo:
-            xfo_lower = xfo.lower().strip()
-            if xfo_lower in ("deny", "sameorigin"):
-                protected = True
-                info("Clickjacking Protection", f"{Colors.GREEN}SECURE (enforced by X-Frame-Options){Colors.RESET}")
-            else:
-                warn(f"X-Frame-Options header value '{xfo}' is invalid/weak. Expected DENY or SAMEORIGIN.")
-                results["findings"].append({
-                    "severity": "MEDIUM",
-                    "issue": f"Weak X-Frame-Options header configuration: {xfo}"
-                })
+    if xfo:
+        info("X-Frame-Options", xfo)
+        if xfo.lower().strip() in {"deny", "sameorigin"}:
+            protected = True
+        elif not protected:
+            results["observations"].append(
+                {
+                    "type": "framing-policy",
+                    "result": "nonstandard-xfo",
+                    "value": xfo,
+                    "note": "Nonstandard X-Frame-Options value; browser behavior should be validated.",
+                }
+            )
 
-    if not protected:
-        warn("Target is vulnerable to clickjacking! No framing restriction headers found.")
-        results["findings"].append({
-            "severity": "MEDIUM",
-            "issue": "Missing framing protection (neither X-Frame-Options nor frame-ancestors CSP directive present)"
-        })
-        results["vulnerable"] = True
+    results["protected"] = protected
+    if protected:
+        info("Framing Protection", f"{Colors.GREEN}Restriction header observed{Colors.RESET}")
+    else:
+        # Header absence establishes potential frameability, not a complete
+        # clickjacking vulnerability. Meaningful UI/action impact is separate.
+        observation = {
+            "type": "potential-frameability",
+            "severity": "INFO",
+            "issue": "No effective X-Frame-Options or CSP frame-ancestors restriction observed",
+            "note": "Potential frameability is a hardening observation; clickjacking impact was not demonstrated.",
+        }
+        results["observations"].append(observation)
+        warn("No effective framing restriction observed; recording potential frameability, not a verified clickjacking vulnerability.")
 
+    # Kept for report-schema compatibility. This module never sets it True from
+    # headers alone because no meaningful UI action has been demonstrated.
+    results["vulnerable"] = False
     return results

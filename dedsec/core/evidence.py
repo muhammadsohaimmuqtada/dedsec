@@ -20,6 +20,7 @@ _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")
 _ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization)\s*[:=]\s*([^\s,;]+)"
 )
+_ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 
 def _utc_now() -> str:
@@ -36,7 +37,12 @@ def _json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def strip_ansi(value: str) -> str:
+    return _ANSI_ESCAPE.sub("", value or "")
+
+
 def redact_text(value: str) -> str:
+    value = strip_ansi(value)
     value = _BEARER.sub("Bearer [REDACTED]", value)
     return _ASSIGNMENT.sub(lambda match: "%s=[REDACTED]" % match.group(1), value)
 
@@ -89,7 +95,8 @@ class EvidenceStore:
             "status": result.status,
             "data": result.data,
             "error": result.error,
-            "output": result.output,
+            # Terminal color control sequences are presentation metadata, not evidence.
+            "output": strip_ansi(result.output or ""),
             "attempts": result.attempts,
             "failure_class": result.failure_class,
         }

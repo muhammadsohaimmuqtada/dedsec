@@ -142,19 +142,21 @@ CHECKS = [
     },
     {
         "id": "swagger_ui",
-        "label": "Swagger UI exposure",
+        "label": "Swagger UI presence",
         "path": "/swagger-ui.html",
-        "severity": "MEDIUM",
+        "severity": "INFO",
         "status_in": {200},
         "content_indicators": ["swagger-ui", "swagger"],
+        "observation_only": True,
     },
     {
         "id": "openapi_json",
-        "label": "OpenAPI JSON exposure",
+        "label": "OpenAPI JSON presence",
         "path": "/openapi.json",
-        "severity": "MEDIUM",
+        "severity": "INFO",
         "status_in": {200},
         "json_keys": ["openapi", "paths"],
+        "observation_only": True,
     },
     {
         "id": "security_txt",
@@ -163,35 +165,39 @@ CHECKS = [
         "severity": "INFO",
         "status_in": {200},
         "content_indicators": ["contact:"],
+        "observation_only": True,
     },
     {
         "id": "crossdomain",
-        "label": "crossdomain.xml exposure",
+        "label": "crossdomain.xml presence",
         "path": "/crossdomain.xml",
-        "severity": "MEDIUM",
+        "severity": "INFO",
         "status_in": {200},
         "content_indicators": ["<allow-access-from"],
+        "observation_only": True,
     },
     {
         "id": "admin_panel",
-        "label": "Admin Panel presence",
+        "label": "Admin panel presence",
         "path": "/admin/",
-        "severity": "HIGH",
-        "status_in": {200, 301, 302},
-        "skip_body_check": True,
+        "severity": "INFO",
+        "status_in": {200, 301, 302, 401, 403},
+        "observation_only": True,
+        "content_indicators": ["admin", "administrator", "login", "dashboard"],
     },
     {
         "id": "wp_login",
         "label": "WordPress login presence",
         "path": "/wp-login.php",
-        "severity": "MEDIUM",
+        "severity": "INFO",
         "status_in": {200},
         "content_indicators": ["wp-submit", "user_login"],
+        "observation_only": True,
     },
 ]
 
 
-def _body_excerpt(resp, limit=300):
+def _body_excerpt(resp, limit=1500):
     text = resp.text if isinstance(resp.text, str) else ""
     return text[:limit].replace("\n", " ").strip().lower()
 
@@ -204,7 +210,7 @@ def _matches_json_keys(resp, keys):
     if not isinstance(data, dict):
         return False
     if not keys:
-        return True # Just valid JSON checks
+        return True
     return all(key in data for key in keys)
 
 
@@ -214,9 +220,6 @@ def _is_confirmed(resp, check, soft404_prof=None):
 
     if resp.status_code not in check["status_in"]:
         return False, "unexpected status"
-
-    if check.get("skip_body_check"):
-        return True, "status code matched"
 
     if check.get("binary_magic"):
         content = resp.content if hasattr(resp, "content") else b""
@@ -237,8 +240,7 @@ def _is_confirmed(resp, check, soft404_prof=None):
     excerpt = _body_excerpt(resp)
     indicators = check.get("content_indicators", [])
     if not indicators:
-        return True, "status matched, no content verification required"
-
+        return True, "status matched"
     if any(indicator in excerpt for indicator in indicators):
         return True, "content signature match"
     return False, "content signature mismatch"
@@ -246,20 +248,30 @@ def _is_confirmed(resp, check, soft404_prof=None):
 
 def run(url, domain, timeout=10):
     section("Common Exposure Checks", "🚨")
-    results = {"confirmed": [], "candidates": [], "tested": 0}
+    results = {
+        "confirmed": [],
+        "observed": [],
+        "candidates": [],
+        "rejected": [],
+        "transport_failures": 0,
+        "tested": 0,
+    }
 
-    # Obtain Soft-404 Profile for the target host
     soft404_prof = get_soft404_profile(url, timeout=min(timeout, 5))
     if soft404_prof:
-        info("Soft-404 Baseline Profile", f"Status {soft404_prof.get('status_code')}, Avg Len ~{soft404_prof.get('avg_length')} bytes")
+        info(
+            "Soft-404 Baseline Profile",
+            f"Status {soft404_prof.get('status_code')}, Avg Len ~{soft404_prof.get('avg_length')} bytes",
+        )
 
     for check in CHECKS:
         test_url = f"{url.rstrip('/')}{check['path']}"
         resp = safe_request(test_url, timeout=timeout, allow_redirects=False)
         results["tested"] += 1
 
-        if not resp:
-            print(f"{Colors.DIM}[ ] {check['label']}: request failed{Colors.RESET}")
+        if resp is None:
+            results["transport_failures"] += 1
+            print(f"{Colors.DIM}[ ] {check['label']}: transport failure{Colors.RESET}")
             continue
 
         confirmed, reason = _is_confirmed(resp, check, soft404_prof)
@@ -272,21 +284,25 @@ def run(url, domain, timeout=10):
             "evidence": reason,
         }
 
-        if confirmed:
+        if confirmed and check.get("observation_only"):
+            finding["classification"] = "observation"
+            results["observed"].append(finding)
+            info(check["label"], f"observed at {test_url}")
+        elif confirmed:
+            finding["classification"] = "verified-sensitive-exposure"
             warn(f"CONFIRMED {check['severity']}: {check['label']} ({test_url})")
             results["confirmed"].append(finding)
-        elif resp.status_code in {200, 401, 403} and reason != "soft 404 response match":
-            print(f"{Colors.DIM}[~] candidate: {check['label']} ({resp.status_code}){Colors.RESET}")
-            results["candidates"].append(finding)
         else:
+            # A bare 200/401/403/redirect without the defining content, JSON,
+            # or binary signature is not positive evidence of an exposure. In
+            # particular, 401/403 can come from generic edge/WAF rules.
+            finding["classification"] = "rejected"
+            results["rejected"].append(finding)
             print(f"{Colors.DIM}[ ] {check['label']}: {resp.status_code} ({reason}){Colors.RESET}")
 
-    if results["confirmed"]:
-        info("Confirmed Exposures", str(len(results["confirmed"])))
-    else:
-        info("Confirmed Exposures", f"{Colors.GREEN}0{Colors.RESET}")
-
-    if results["candidates"]:
-        warn(f"{len(results['candidates'])} candidate endpoint(s) need manual validation.")
-
+    info("Confirmed Sensitive Exposures", str(len(results["confirmed"])))
+    if results["observed"]:
+        info("Surface Observations", str(len(results["observed"])))
+    if results["transport_failures"]:
+        warn(f"{results['transport_failures']} probe(s) had transport failures; those paths are inconclusive.")
     return results

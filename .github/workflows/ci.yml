@@ -22,12 +22,14 @@ jobs:
           pip install -e '.[dev]'
       - name: Ruff
         run: ruff check .
+      - name: Compile
+        run: python -m compileall -q dedsec tests
 
   test:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.8', '3.11', '3.12']
+        python-version: ['3.8', '3.11', '3.12', '3.13']
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +42,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
           pip check
-      - name: Unit tests
+      - name: Unit and regression tests
         run: python -m unittest discover -s tests -v
       - name: CLI smoke test
-        run: dedsec --version
+        run: |
+          dedsec --version
+          dedsec --help >/dev/null
