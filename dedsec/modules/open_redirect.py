@@ -13,7 +13,9 @@ REDIRECT_PARAMS = [
     "r", "u", "l", "uri", "path", "back",
 ]
 
-ATTACKER_URL = "https://evil.example.com"
+# .invalid is reserved for non-resolving examples. DEDSEC never follows an
+# external Location; this value is only reflected into the in-scope request.
+ATTACKER_URL = "https://attacker.invalid"
 MAX_REDIRECT_HOPS = 5
 
 META_REFRESH_RE = re.compile(
@@ -54,8 +56,6 @@ def _follow_redirects(start_url, domain, timeout, max_hops=MAX_REDIRECT_HOPS):
         if resp.status_code not in {301, 302, 303, 307, 308} or not location:
             break
         if _is_external(location_host, domain):
-            # Evidence is the Location header returned by the in-scope target.
-            # Never follow the browser to the external destination.
             break
         current = absolute_location
     return chain
@@ -95,7 +95,6 @@ def run(url, domain, timeout=10):
     base_resp = safe_request(url, timeout=timeout)
     body_redirects = _body_redirect_check(base_resp, domain)
     if body_redirects:
-        # Static redirects can be intentional; record as surface observations.
         results["body_redirects"] = body_redirects
         for item in body_redirects:
             warn(f"Body redirect observation ({item['type']}): {item['url']}")
@@ -136,7 +135,6 @@ def run(url, domain, timeout=10):
                 f"{Colors.DIM}[~] candidate: '{param}' external redirect was not isolated from control behavior{Colors.RESET}"
             )
 
-    # Bounded POST validation with an explicit internal negative control.
     for param in ["url", "redirect", "next", "return", "redirect_uri"]:
         results["post_tested"] += 1
         attack_resp = safe_request(
