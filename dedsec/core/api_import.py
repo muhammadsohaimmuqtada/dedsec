@@ -73,12 +73,15 @@ class OpenAPIImporter:
 
     Local JSON-Pointer references are resolved with bounded recursion. Remote or
     file references are never fetched automatically; they are surfaced as
-    unresolved coverage metadata instead.
+    unresolved coverage metadata instead. Researcher-prepared identity headers
+    may be attached to request records, but are redacted at persistence/report
+    boundaries by the shared evidence redactor.
     """
 
-    def __init__(self, target_url: str, scope=None):
+    def __init__(self, target_url: str, scope=None, default_headers: Optional[Dict[str, str]] = None):
         self.target_url = target_url
         self.scope = scope
+        self.default_headers = {str(k): str(v) for k, v in (default_headers or {}).items()}
         self._spec: Dict[str, Any] = {}
         self._unresolved_refs: List[str] = []
 
@@ -218,8 +221,6 @@ class OpenAPIImporter:
             first = servers[0]
             if isinstance(first, dict) and first.get("url"):
                 raw = str(first["url"])
-                # Server variables are not guessed; keep unresolved placeholders
-                # visible rather than fabricating a host/path.
                 if "{" in raw or "}" in raw:
                     self._note_unresolved("server-variable:%s" % raw)
                 elif raw.startswith(("http://", "https://")):
@@ -272,11 +273,16 @@ class OpenAPIImporter:
         merged: Dict[Tuple[str, str], InsertionPoint] = {
             _point_key(item): item for item in inferred
         }
-        # Explicit schema metadata (required/type/path_template) wins over
-        # generic inference for the same logical input location/name.
         for item in explicit:
             merged[_point_key(item)] = item
         return [merged[key] for key in sorted(merged)]
+
+    @staticmethod
+    def _set_sample_header(headers: Dict[str, str], name: str, value: Any) -> None:
+        lowered = str(name).lower()
+        if any(str(existing).lower() == lowered for existing in headers):
+            return
+        headers[str(name)] = str(value)
 
     def ingest(
         self,
@@ -315,7 +321,7 @@ class OpenAPIImporter:
                 parameters = self._merge_parameters(path_parameters, operation.get("parameters"))
                 rendered_path = str(path_template)
                 query: List[Tuple[str, Any]] = []
-                headers: Dict[str, str] = {}
+                headers: Dict[str, str] = dict(self.default_headers)
                 explicit_points: List[InsertionPoint] = []
                 body: Any = None
                 content_type: Optional[str] = None
@@ -347,7 +353,7 @@ class OpenAPIImporter:
                     elif location == "query":
                         query.append((name, sample))
                     elif location == "header":
-                        headers[name] = str(sample)
+                        self._set_sample_header(headers, name, sample)
 
                 request_body = self._resolve(operation.get("requestBody"))
                 if isinstance(request_body, dict):
@@ -418,6 +424,7 @@ class OpenAPIImporter:
                         "deprecated": bool(operation.get("deprecated")),
                         "security": operation.get("security", spec.get("security")),
                         "scope_allowed": scope_allowed,
+                        "identity_headers_attached": bool(self.default_headers),
                     },
                 )
                 workspace.add_request(request)
@@ -450,6 +457,7 @@ class OpenAPIImporter:
             "unresolved_references": unresolved,
             "unresolved_reference_count": len(unresolved),
             "remote_references_fetched": 0,
+            "identity_headers_attached": bool(self.default_headers),
         }
 
     def ingest_file(
