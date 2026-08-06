@@ -228,6 +228,34 @@ class TransportTests(unittest.TestCase):
         context.close()
 
     @patch("requests.Session.request")
+    def test_alternate_scheme_failure_does_not_poison_primary_endpoint(self, request_mock):
+        success = Mock(spec=requests.Response)
+        success.status_code = 200
+        success.headers = {}
+        request_mock.side_effect = [
+            requests.exceptions.ConnectionError("port 80 unavailable"),
+            requests.exceptions.ConnectionError("port 80 unavailable"),
+            success,
+        ]
+        context = ScanContext.build(
+            "https://example.com",
+            "example.com",
+            timeout=1,
+            max_requests=10,
+            health_failure_threshold=2,
+            health_cooldown_seconds=30,
+        )
+        engine = context.get_transport(retries=0)
+        self.assertFalse(engine.request("GET", "http://example.com/a", cache=False).ok)
+        self.assertFalse(engine.request("GET", "http://example.com/b", cache=False).ok)
+        self.assertFalse(context.target_health.should_short_circuit())
+        primary = engine.request("GET", "https://example.com/c", cache=False)
+        self.assertTrue(primary.ok)
+        self.assertEqual(request_mock.call_count, 3)
+        self.assertEqual(context.target_health.snapshot()["state"], "reachable")
+        context.close()
+
+    @patch("requests.Session.request")
     def test_redirect_outside_scope_is_not_followed(self, request_mock):
         response = Mock(spec=requests.Response)
         response.status_code = 302
