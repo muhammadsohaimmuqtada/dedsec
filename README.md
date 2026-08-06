@@ -1,35 +1,41 @@
 # DEDSEC — Evidence-Driven Web Reconnaissance Framework
 
-[![Version](https://img.shields.io/badge/version-1.3.0-4c8bf5?style=flat-square)](https://github.com/muhammadsohaimmuqtada/dedsec)
+[![Version](https://img.shields.io/badge/version-1.3.1-4c8bf5?style=flat-square)](https://github.com/muhammadsohaimmuqtada/dedsec)
 [![Python](https://img.shields.io/badge/Python-3.8--3.13-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![CI](https://img.shields.io/github/actions/workflow/status/muhammadsohaimmuqtada/dedsec/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/muhammadsohaimmuqtada/dedsec/actions)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
 DEDSEC is a modular reconnaissance framework for **authorized web security testing**. It combines attack-surface discovery, service profiling, web-configuration analysis, endpoint extraction, evidence capture, and structured reporting in a single CLI.
 
-The 1.3 release is benchmark-driven. It hardens execution deadlines and cancellation, routes legacy target HTTP traffic through the scoped v2 transport, and tightens detector semantics so observations are not promoted into vulnerabilities without evidence.
+The 1.3 release line is benchmark-driven. Version 1.3.0 introduced killable module processes, hard scan deadlines, scoped target HTTP, stronger evidence handling, and conservative detector semantics. Version 1.3.1 adds target-reachability awareness so an unavailable or filtered target is reported as an operational condition instead of causing repeated long waits or misleading security conclusions.
 
 ## Project status
 
 | Component | Current state |
 | --- | --- |
-| Package version | `1.3.0` |
+| Package version | `1.3.1` |
 | Built-in modules | `24` |
-| Report schema | `2.0` |
+| Report schema | `2.1` |
 | Supported Python | `3.8`–`3.13` |
 | Execution | Process-isolated concurrent modules with hard deadlines |
 | Target HTTP | Scoped, verified TLS, bounded redirects, shared request budget |
+| Reachability | Bounded preflight + shared root-target health circuit |
+| Module outcomes | `SUCCESS`, `PARTIAL`, `INCONCLUSIVE`, `FAILED`, `TIMEOUT`, `ABORTED` |
 | Evidence | Scan IDs, SHA-256 evidence references, redaction, ANSI-clean artifacts |
 | Finding model | Observation → candidate/hypothesis → verified finding |
-| Legacy compatibility | `safe_request()` transparently inherits the v2 HTTP runtime inside module processes |
+| Legacy compatibility | `safe_request()` inherits the v2 HTTP runtime inside module processes |
 | CI | Ruff + compile + unittest/package/CLI matrix |
 
 ## Highlights
 
 - 24 built-in reconnaissance and security-posture modules
-- process-isolated module execution: a stuck module can be terminated instead of holding the scanner indefinitely
+- process-isolated module execution: blocked modules can be terminated instead of holding the scanner indefinitely
 - hard per-module and global scan deadlines
-- live module start/completion/timeout progress
+- bounded TCP preflight for target reachability telemetry
+- process-shared target-health state to prevent every HTTP module from independently reproving the same outage
+- total logical HTTP request deadlines: retries and backoff do not multiply `--timeout`
+- explicit `PARTIAL` and `INCONCLUSIVE` outcomes for incomplete evidence
+- TCP port states preserved as open, closed, filtered/timeout, unreachable, or error
 - centralized target HTTP scope and request budgeting
 - TLS verification enabled by default with no automatic insecure fallback
 - redirect scope enforcement: automatic redirects are not followed outside target scope
@@ -37,7 +43,7 @@ The 1.3 release is benchmark-driven. It hardens execution deadlines and cancella
 - cache keys vary by headers, request body, parameters, and redirect behavior
 - evidence IDs, sensitive-value redaction, ANSI-clean evidence, and optional atomic artifacts
 - conservative observation → candidate → verified-finding correlation
-- versioned JSON report schema with runtime metadata
+- versioned JSON report schema with runtime and reachability metadata
 - Python 3.8–3.13 CI matrix
 
 ## Architecture
@@ -45,11 +51,20 @@ The 1.3 release is benchmark-driven. It hardens execution deadlines and cancella
 ```text
 CLI
  │
+ ├── bounded TCP preflight
+ │         │
+ │         ▼
+ │   TargetHealth
+ │   ├── reachable
+ │   ├── degraded
+ │   └── unreachable / temporary circuit
+ │
  ▼
 ScanContext
  ├── ScopePolicy
  ├── target HTTP request budget
  ├── evidence identity
+ ├── TargetHealth
  └── TransportEngine
         │
         ▼
@@ -57,7 +72,8 @@ Process Supervisor
  ├── hard module deadline
  ├── hard global deadline
  ├── Ctrl+C / abort termination
- └── bounded concurrency
+ ├── bounded concurrency
+ └── HTTP-required module short-circuit when target is unreachable
         │
    ┌────┴───────────────────────────┐
    ▼                                ▼
@@ -68,7 +84,9 @@ run_with_context(context)     legacy run(url, ...)
        scoped target HTTP bridge
                   │
                   ▼
-            Module results
+      Module terminal outcome
+SUCCESS / PARTIAL / INCONCLUSIVE /
+FAILED / TIMEOUT / ABORTED
                   │
                   ▼
        Evidence + correlation
@@ -77,29 +95,56 @@ run_with_context(context)     legacy run(url, ...)
 Observation → hypothesis → verified finding
                   │
                   ▼
-           JSON schema 2.0
+           JSON schema 2.1
 ```
 
-Each selected module executes in its own child process. The parent supervisor owns deadlines and can terminate a blocked child. Legacy modules remain compatible, but their `safe_request()` target HTTP calls are automatically bound to the scan context inside that process—including calls made from module worker threads.
+Each selected module executes in its own child process. The parent supervisor owns hard deadlines and can terminate a blocked child. Legacy modules remain compatible, but their `safe_request()` target HTTP calls are bound to the scan context inside that process, including calls made from module worker threads.
+
+## Reachability and resilience semantics
+
+DEDSEC separates **target availability** from **security findings**.
+
+Before module execution, DEDSEC normally performs a bounded TCP connection preflight to the service implied by the supplied target URL. For `https://example.com`, that means TCP 443 unless an explicit port is supplied. The preflight sends no HTTP request and no application payload.
+
+Two failed preflight connection attempts can mark the root target temporarily unreachable. While that short circuit is open, modules that fundamentally require root-target HTTP are recorded as `INCONCLUSIVE` instead of being launched to repeat the same transport failure. DNS, WHOIS, raw TCP, TLS, geo/network, email-DNS, and mixed-source discovery can continue according to their own module behavior.
+
+The health state is deliberately narrow. `UNREACHABLE` means DEDSEC could not establish the required transport path from the scanner's current network position. It does **not** claim that the target is globally down, blocked by a specific product, or intentionally filtering the researcher.
+
+Use `--skip-preflight` only when you intentionally want modules to attempt the target without the initial TCP reachability check.
 
 ## Enforcement boundaries
 
 DEDSEC distinguishes **target HTTP traffic** from other network operations.
 
-For target HTTP requests made through the DEDSEC HTTP helper/runtime, 1.3 enforces:
+For target HTTP requests made through the DEDSEC HTTP helper/runtime, 1.3.1 enforces:
 
 - target host/subdomain scope policy;
 - optional root-only policy;
 - TLS verification;
 - bounded redirect following with scope checks on each hop;
 - shared target HTTP request budget;
-- bounded retries/backoff;
-- request timeout;
+- bounded retries and backoff inside one logical request deadline;
+- root-target reachability feedback and temporary short-circuiting;
 - cache isolation for header/body-varying requests.
 
-The `--max-requests` value is specifically a **target HTTP request budget**. DNS queries, WHOIS lookups, raw TCP port connections, TLS protocol probes, and approved external-intelligence lookups are not represented as target HTTP requests and are not counted in that number. They remain bounded by their own operation timeouts and, critically, by the process-level module/global deadlines.
+`--timeout` is the **total logical deadline for one DEDSEC HTTP request**, including retries and backoff. For example, `--timeout 10 --retries 3` does not grant four independent ten-second waits; the complete logical request remains bounded to approximately ten seconds.
 
-Built-in external HTTP intelligence sources are narrowly allowlisted for the modules that use them. Unknown out-of-scope HTTP destinations fail closed while a scan context is active.
+The `--max-requests` value is specifically a **target HTTP request budget**. DNS queries, WHOIS lookups, raw TCP port connections, TLS protocol probes, and approved external-intelligence lookups are not represented as target HTTP requests and are not counted in that number. Those operations remain bounded by their own operation timeouts and by the process-level module/global deadlines.
+
+Built-in external HTTP intelligence sources are narrowly allowlisted for modules that use them. Unknown out-of-scope HTTP destinations fail closed while a scan context is active.
+
+## Module outcome model
+
+A process completing is not automatically the same as a conclusive scan result.
+
+- **SUCCESS** — the module completed its intended evidence collection without a material execution limitation.
+- **PARTIAL** — useful evidence was collected, but part of the module's intended collection was unavailable.
+- **INCONCLUSIVE** — the module could not gather enough evidence to support either a positive or negative conclusion, commonly because the required target transport was unavailable.
+- **FAILED** — the module encountered a non-timeout execution failure.
+- **TIMEOUT** — a configured hard module or global deadline terminated the work.
+- **ABORTED** — execution was intentionally stopped, including user cancellation.
+
+A `PARTIAL`, `INCONCLUSIVE`, `FAILED`, `TIMEOUT`, or `ABORTED` module must not be interpreted as evidence that a vulnerability is absent.
 
 ## Modules
 
@@ -114,20 +159,20 @@ Built-in external HTTP intelligence sources are narrowly allowlisted for the mod
 | `redirect` | Open Redirect Check | Controlled redirect analysis with negative controls and no external-follow behavior |
 | `robots` | Robots & Sitemap | robots.txt and sitemap discovery |
 | `cookies` | Cookie Audit | Cookie security attributes and scope |
-| `ports` | Port Exposure Scan | Bounded TCP service discovery; open ports are observations, not vulnerabilities by number alone |
+| `ports` | Port Exposure Scan | Bounded TCP service discovery with explicit network-state classification |
 | `whois` | WHOIS Lookup | Registration metadata |
 | `subdomains` | Subdomain Enumeration | Multi-source discovery, provenance, unresolved-candidate preservation, and validation |
 | `js` | JS & Endpoint Extraction | In-scope JS assets, typed routes, API candidates, and conservative secret-shape detection |
-| `hosting` | Hosting Intelligence | Hosting and network-provider context |
+| `hosting` | Hosting Intelligence | Hosting and network-provider context; may complete partially without target HTTP |
 | `exposures` | Common Exposure Checks | Signature-validated sensitive exposures plus rejected/unverified outcomes |
 | `cors` | CORS Check | Cross-origin configuration candidates without impact overclaiming |
 | `csp` | CSP Analyzer | CSP hardening observations and directive analysis |
 | `ratelimit` | Rate-Limit Observation | Small bounded throttling sample; absence of 429 is not declared a vulnerability |
 | `clickjacking` | Framing Posture | Framing restrictions and potential frameability observations |
 | `email` | Email Security | DNS-only SPF, DMARC, DKIM-selector discovery, and MX posture by default |
-| `vhost` | Virtual Host Finder | In-scope Host-header response-difference candidates |
+| `vhost` | Virtual Host Finder | In-scope Host-header response-difference candidates; no baseline means inconclusive |
 | `api_schema` | API & OpenAPI Scanner | Public schema discovery and deduplicated endpoint extraction |
-| `http_methods` | HTTP Methods Audit | Method declarations and bounded TRACE validation without PUT/DELETE writes |
+| `http_methods` | HTTP Methods Audit | Method declarations and bounded TRACE validation; transport loss becomes partial/inconclusive |
 | `security_policy` | Security Policy Audit | security.txt and disclosure-policy discovery |
 
 ## Installation
@@ -173,6 +218,14 @@ dedsec https://example.com \
   --max-requests 1000
 ```
 
+Tune or bypass preflight deliberately:
+
+```bash
+dedsec https://example.com --preflight-timeout 3
+
+dedsec https://example.com --skip-preflight
+```
+
 Restrict target HTTP to the root host:
 
 ```bash
@@ -209,13 +262,15 @@ dedsec https://example.com --market
 
 ## Timeout semantics
 
-DEDSEC 1.3 separates three concepts:
+DEDSEC 1.3.1 separates three deadlines:
 
-- `--timeout`: per-request / per-operation timeout passed into modules;
+- `--timeout`: total logical deadline for one DEDSEC HTTP request, including retries/backoff;
 - `--module-timeout`: hard wall-clock deadline for each module process, default `120s`;
 - `--global-timeout`: hard wall-clock deadline for the complete scan, default `600s`.
 
-If a module blocks inside a library or socket call beyond its module deadline, the parent process terminates it and records a terminal timeout result. A global timeout terminates active modules and marks work that never started as timed out. Ctrl+C uses the same termination path rather than waiting indefinitely for worker threads.
+Module-specific DNS, socket, WHOIS, TLS, or other non-HTTP operations may use their own bounded operation timeout internally. They are still contained by the hard module/global process deadlines.
+
+If a module blocks inside a library or socket call beyond its module deadline, the parent process terminates it and records a terminal timeout result. A global timeout terminates active modules and marks work that never started as timed out. Ctrl+C uses the same process-termination path rather than waiting indefinitely for worker threads.
 
 ## Evidence and reporting
 
@@ -228,7 +283,7 @@ DEDSEC separates collection from security conclusions. A report may contain:
 
 Evidence records contain scan identity, module provenance, timestamps, SHA-256 digests, redacted structured data, and optional atomic JSON artifacts. Terminal ANSI styling is removed before evidence persistence.
 
-Report runtime metadata records target HTTP request use and explicitly distinguishes traffic classes that are not part of the target HTTP budget.
+Schema 2.1 runtime metadata records target HTTP request use, preflight telemetry, target-health state, and traffic classes that are not part of the target HTTP budget.
 
 ## Detector precision principles
 
@@ -242,6 +297,8 @@ DEDSEC deliberately avoids several common scanner shortcuts:
 - reflected CORS headers are not a verified vulnerability without demonstrated cross-origin impact;
 - a DKIM search across common selectors cannot prove DKIM is absent;
 - an open port is an exposure observation; severity depends on the service and access context;
+- a TCP timeout is not reported as a confirmed closed port;
+- target unreachability is an execution condition, not a security finding;
 - WAF/CDN fingerprinting reports uncertainty when vendor-specific evidence is insufficient.
 
 ## Development and contribution
