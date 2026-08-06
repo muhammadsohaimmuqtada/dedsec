@@ -63,9 +63,16 @@ def _ip_metadata(ip, timeout):
 
 def run(url, domain, timeout=10):
     section("Hosting Intelligence", "🏢")
-    results = {"ips": [], "cdn_signals": [], "provider_summary": []}
+    results = {
+        "ips": [],
+        "cdn_signals": [],
+        "provider_summary": [],
+        "target_http_reachable": None,
+        "partial": False,
+    }
 
     response = safe_request(url, timeout=timeout)
+    results["target_http_reachable"] = response is not None
     headers = {
         key.lower(): value.lower()
         for key, value in (response.headers.items() if response is not None else [])
@@ -84,9 +91,13 @@ def run(url, domain, timeout=10):
     ips = list(cached_resolve_ips(domain))
     if not ips:
         warn("Could not resolve target IPs.")
+        results["inconclusive"] = True
+        results["error"] = "Could not resolve target IPs"
+        results["failure_class"] = "dns"
         return results
 
     provider_counts = {}
+    metadata_successes = 0
     for ip in ips:
         reverse_dns = _reverse_dns(ip)
         metadata = _ip_metadata(ip, timeout)
@@ -98,6 +109,7 @@ def run(url, domain, timeout=10):
         if "error" in metadata:
             warn(f"Metadata unavailable for {ip}: {metadata['error']}")
         else:
+            metadata_successes += 1
             info("Provider Guess", provider)
             print(
                 f"{Colors.DIM}    ASN={metadata['asn']} ISP={metadata['isp']} "
@@ -112,4 +124,13 @@ def run(url, domain, timeout=10):
     results["provider_summary"] = summary
     if summary:
         info("Provider Summary", ", ".join(summary))
+
+    if response is None:
+        results["partial"] = True
+        results["error"] = "Target HTTP fingerprint unavailable; DNS/provider intelligence completed"
+        results["failure_class"] = "partial_target_transport"
+    elif metadata_successes < len(ips):
+        results["partial"] = True
+        results["error"] = "One or more external hosting metadata lookups were unavailable"
+        results["failure_class"] = "partial_external_intelligence"
     return results
