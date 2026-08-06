@@ -6,7 +6,9 @@ from typing import Any, Dict, List, Optional
 class ScanConfig:
     timeout: int = 10
     concurrency: int = 5
-    module_timeout: Optional[int] = None
+    # Hard outer deadline for one module process. A finite default prevents a
+    # blocking dependency/socket from holding the scanner indefinitely.
+    module_timeout: Optional[int] = 120
     global_timeout: Optional[int] = None
     retries: int = 3
     backoff: float = 0.5

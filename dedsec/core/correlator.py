@@ -47,6 +47,19 @@ class FindingsCorrelator:
             "details": details,
         }
 
+    @staticmethod
+    def _positive_exposure_candidate(item: Dict[str, Any]) -> bool:
+        evidence = str(item.get("evidence", "")).lower()
+        # A 200/401/403 without the defining content signature is not a positive
+        # security signal; it is a rejected validation attempt.
+        negative_markers = {
+            "content signature mismatch",
+            "binary magic bytes missing",
+            "json validation failed",
+            "soft 404 response match",
+        }
+        return bool(evidence and evidence not in negative_markers)
+
     def correlate(self, module_results: List[ModuleResult]) -> Dict[str, Any]:
         result_map = {
             res.module: res
@@ -90,14 +103,25 @@ class FindingsCorrelator:
                         )
                     )
             for item in exposures.data.get("candidates", []):
-                hypotheses.append(
-                    self._hypothesis(
-                        exposures,
-                        item.get("label", "Exposure candidate"),
-                        item,
-                        "candidate response requires manual validation",
+                if self._positive_exposure_candidate(item):
+                    hypotheses.append(
+                        self._hypothesis(
+                            exposures,
+                            item.get("label", "Exposure candidate"),
+                            item,
+                            "positive response requires manual validation",
+                        )
                     )
-                )
+                else:
+                    rejected_or_unverified.append(
+                        {
+                            "source": "exposures",
+                            "finding": item.get("label", "Exposure candidate"),
+                            "reason": item.get("evidence", "validation signal did not match"),
+                            "evidence_ids": self._evidence_ids(exposures),
+                            "details": item,
+                        }
+                    )
 
         redirect = result_map.get("redirect")
         if redirect:
@@ -158,13 +182,26 @@ class FindingsCorrelator:
                             str(item.get("impact")),
                         )
                     )
-                else:
+                elif item.get("candidate") is True:
                     hypotheses.append(
                         self._hypothesis(
                             cors,
                             item.get("issue", "CORS behavior requiring validation"),
                             item,
                             "configuration signal alone is not demonstrated impact",
+                        )
+                    )
+
+        js = result_map.get("js")
+        if js:
+            for item in js.data.get("secrets", []):
+                if item.get("confidence") == "high" and item.get("validated") is True:
+                    hypotheses.append(
+                        self._hypothesis(
+                            js,
+                            "Potential exposed secret: %s" % item.get("type", "unknown"),
+                            item,
+                            "secret-shaped value requires owner-side revocation/validity confirmation",
                         )
                     )
 
@@ -175,8 +212,13 @@ class FindingsCorrelator:
         technology_summary: Dict[str, Any] = {"server": None, "cms": [], "frameworks": []}
         tech = result_map.get("tech")
         if tech:
+            server = tech.data.get("server") or tech.data.get("server_header")
+            if not server:
+                servers = tech.data.get("servers", [])
+                if servers and isinstance(servers[0], dict):
+                    server = servers[0].get("name")
             technology_summary = {
-                "server": tech.data.get("server"),
+                "server": server,
                 "cms": [
                     item.get("name")
                     for item in tech.data.get("cms", [])

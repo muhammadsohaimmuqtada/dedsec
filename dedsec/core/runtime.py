@@ -6,16 +6,71 @@ from dedsec.core.evidence import EvidenceStore
 from dedsec.core.scope import ScopePolicy
 
 
-@dataclass
 class RequestBudget:
-    max_requests: Optional[int] = 1000
-    requests_used: int = 0
+    """Thread/process-safe request budget shared by runtime-aware modules."""
+
+    def __init__(
+        self,
+        max_requests: Optional[int] = 1000,
+        requests_used: int = 0,
+        shared_counter=None,
+        shared_lock=None,
+    ):
+        self.max_requests = max_requests
+        self._requests_used = int(requests_used)
+        self._lock = threading.RLock()
+        self._shared_counter = shared_counter
+        self._shared_lock = shared_lock
+
+    @property
+    def requests_used(self) -> int:
+        if self._shared_counter is not None:
+            return int(self._shared_counter.value)
+        with self._lock:
+            return self._requests_used
 
     @property
     def remaining(self) -> Optional[int]:
         if self.max_requests is None:
             return None
         return max(0, self.max_requests - self.requests_used)
+
+    def set_used(self, value: int) -> None:
+        value = max(0, int(value))
+        if self._shared_counter is not None:
+            lock = self._shared_lock
+            if lock is None:
+                self._shared_counter.value = value
+            else:
+                with lock:
+                    self._shared_counter.value = value
+            return
+        with self._lock:
+            self._requests_used = value
+
+    def consume(self, amount: int = 1) -> bool:
+        """Atomically consume budget and return False when exhausted."""
+        amount = max(1, int(amount))
+        if self._shared_counter is not None:
+            lock = self._shared_lock
+            if lock is None:
+                current = int(self._shared_counter.value)
+                if self.max_requests is not None and current + amount > self.max_requests:
+                    return False
+                self._shared_counter.value = current + amount
+                return True
+            with lock:
+                current = int(self._shared_counter.value)
+                if self.max_requests is not None and current + amount > self.max_requests:
+                    return False
+                self._shared_counter.value = current + amount
+                return True
+
+        with self._lock:
+            if self.max_requests is not None and self._requests_used + amount > self.max_requests:
+                return False
+            self._requests_used += amount
+            return True
 
 
 @dataclass

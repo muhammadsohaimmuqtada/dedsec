@@ -1,10 +1,15 @@
 import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from dedsec.core.colors import Colors
 from dedsec.core.utils import error, info, section, warn
 
 RECORD_TYPES = ["A", "AAAA", "MX", "NS", "TXT", "CNAME", "SOA", "CAA"]
 MAX_RECORDS_PER_TYPE = 25
+DKIM_SELECTORS = [
+    "default", "google", "mail", "dkim", "k1", "s1", "s2", "mailjet",
+    "sendgrid", "amazonses", "selector1", "selector2", "smtp", "email", "key1", "key2",
+]
 
 try:
     import dns.exception
@@ -17,25 +22,10 @@ except ImportError:
     _DNS_AVAILABLE = False
 
 
-def _fetch_record(resolver, domain, rtype):
-    """Query a single DNS record type; returns (rtype, values, error_code)."""
-    try:
-        values = _resolve_records(resolver, domain, rtype)
-        return rtype, values, None
-    except dns.resolver.NXDOMAIN:
-        return rtype, [], "NXDOMAIN"
-    except dns.resolver.NoNameservers:
-        return rtype, [], f"{rtype} query failed: authoritative nameserver unavailable"
-    except dns.exception.Timeout:
-        return rtype, [], f"{rtype} query timed out."
-    except Exception as exc:
-        return rtype, [], f"{rtype} query failed: {exc}"
-
-
 def _resolver(timeout):
     resolver = dns.resolver.Resolver(configure=True)
     resolver.timeout = min(timeout, 4)
-    resolver.lifetime = timeout
+    resolver.lifetime = min(timeout, 8)
     return resolver
 
 
@@ -43,141 +33,131 @@ def _resolve_records(resolver, domain, rtype):
     answers = resolver.resolve(domain, rtype, raise_on_no_answer=False)
     if not answers:
         return []
-    values = [str(rdata).strip() for rdata in answers][:MAX_RECORDS_PER_TYPE]
-    return values
+    return [str(rdata).strip() for rdata in answers][:MAX_RECORDS_PER_TYPE]
+
+
+def _fetch_record(resolver, domain, rtype):
+    try:
+        return rtype, _resolve_records(resolver, domain, rtype), None
+    except dns.resolver.NXDOMAIN:
+        return rtype, [], "NXDOMAIN"
+    except dns.resolver.NoNameservers:
+        return rtype, [], "authoritative nameserver unavailable"
+    except dns.exception.Timeout:
+        return rtype, [], "query timed out"
+    except Exception as exc:
+        return rtype, [], f"query failed: {exc}"
 
 
 def _extract_txt_like(values):
-    normalized = []
-    for value in values:
-        normalized.append(value.strip('"').replace('" "', ""))
-    return normalized
-
-
-DKIM_SELECTORS = [
-    "default", "google", "mail", "dkim", "k1", "s1", "s2",
-    "mailjet", "sendgrid", "amazonses", "selector1", "selector2",
-    "smtp", "email", "key1", "key2",
-]
+    return [value.strip('"').replace('" "', "") for value in values]
 
 
 def _check_dkim(domain, timeout):
-    """Check common DKIM selectors. Returns list of found selectors."""
     found = []
-    resolver = _resolver(timeout)
 
-    def _try_selector(sel):
+    def _try_selector(selector):
         try:
-            recs = _resolve_records(resolver, f"{sel}._domainkey.{domain}", "TXT")
-            for rec in recs:
-                if "v=dkim1" in rec.lower() or "p=" in rec.lower():
-                    return sel
+            recs = _resolve_records(_resolver(timeout), f"{selector}._domainkey.{domain}", "TXT")
+            if any("v=dkim1" in rec.lower() or "p=" in rec.lower() for rec in recs):
+                return selector
         except Exception:
             pass
         return None
 
     with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {executor.submit(_try_selector, sel): sel for sel in DKIM_SELECTORS}
+        futures = [executor.submit(_try_selector, selector) for selector in DKIM_SELECTORS]
         for future in as_completed(futures):
-            result = future.result()
-            if result:
-                found.append(result)
-    return found
+            selector = future.result()
+            if selector:
+                found.append(selector)
+    return sorted(found)
 
 
 def _check_dnssec(domain, timeout):
-    """Check if DS records exist (DNSSEC enabled at parent)."""
     try:
-        resolver = _resolver(timeout)
-        ds_records = _resolve_records(resolver, domain, "DS")
-        return bool(ds_records), ds_records
+        records = _resolve_records(_resolver(timeout), domain, "DS")
+        return bool(records), records
     except Exception:
         return False, []
 
 
-def _check_dangling_cnames(domain, cname_records, timeout):
-    """For each CNAME target, try to resolve it. Unresolvable = potential takeover."""
-    dangling = []
+def _check_dangling_cnames(domain, cname_records):
+    candidates = []
     for cname_target in cname_records:
         target = cname_target.rstrip(".")
         try:
             socket.gethostbyname(target)
         except socket.gaierror:
-            # NXDOMAIN / unresolvable CNAME target
-            dangling.append({"cname": domain, "target": target})
+            candidates.append(
+                {
+                    "cname": domain,
+                    "target": target,
+                    "verified": False,
+                    "classification": "dangling-dns-candidate",
+                }
+            )
         except Exception:
             pass
-    return dangling
+    return candidates
 
 
-def _security_posture(domain, txt_records):
-    findings = {
+def _security_posture(domain, txt_records, timeout):
+    posture = {
         "spf": {"present": False, "strict": False, "policy": None, "severity": None},
-        "dmarc": {"present": False, "strict": False, "policy": None},
+        "dmarc": {"present": False, "strict": False, "policy": None, "record": None},
     }
-
     spf_values = [txt for txt in txt_records if txt.lower().startswith("v=spf1")]
-    findings["spf"]["present"] = bool(spf_values)
+    posture["spf"]["present"] = bool(spf_values)
     if spf_values:
         spf = spf_values[0].lower()
-        if "+all" in spf:
-            findings["spf"]["policy"] = "+all"
-            findings["spf"]["severity"] = "CRITICAL"
-            findings["spf"]["strict"] = False
-        elif "?all" in spf:
-            findings["spf"]["policy"] = "?all"
-            findings["spf"]["severity"] = "MEDIUM"
-            findings["spf"]["strict"] = False
-        elif "~all" in spf:
-            findings["spf"]["policy"] = "~all"
-            findings["spf"]["severity"] = "LOW"
-            findings["spf"]["strict"] = True
-        elif "-all" in spf:
-            findings["spf"]["policy"] = "-all"
-            findings["spf"]["severity"] = "PASS"
-            findings["spf"]["strict"] = True
-        else:
-            findings["spf"]["policy"] = "missing-all"
-            findings["spf"]["severity"] = "HIGH"
+        for mechanism, severity, strict in [
+            ("+all", "CRITICAL", False),
+            ("?all", "MEDIUM", False),
+            ("~all", "LOW", False),
+            ("-all", "PASS", True),
+        ]:
+            if mechanism in spf:
+                posture["spf"].update(policy=mechanism, severity=severity, strict=strict)
+                break
+        if posture["spf"]["policy"] is None:
+            posture["spf"].update(policy="missing-all", severity="MEDIUM", strict=False)
 
-    dmarc_domain = f"_dmarc.{domain}"
     try:
-        dmarc_raw = _resolve_records(_resolver(4), dmarc_domain, "TXT")
-        dmarc_values = _extract_txt_like(dmarc_raw)
+        dmarc_values = _extract_txt_like(
+            _resolve_records(_resolver(timeout), f"_dmarc.{domain}", "TXT")
+        )
     except Exception:
         dmarc_values = []
-
-    dmarc_entry = next((txt for txt in dmarc_values if txt.lower().startswith("v=dmarc1")), None)
-    findings["dmarc"]["present"] = bool(dmarc_entry)
-    findings["dmarc"]["record"] = dmarc_entry
-    if dmarc_entry:
-        dmarc_lower = dmarc_entry.lower()
-        if "p=reject" in dmarc_lower:
-            findings["dmarc"]["policy"] = "reject"
-            findings["dmarc"]["strict"] = True
-        elif "p=quarantine" in dmarc_lower:
-            findings["dmarc"]["policy"] = "quarantine"
-            findings["dmarc"]["strict"] = True
-        elif "p=none" in dmarc_lower:
-            findings["dmarc"]["policy"] = "none"
-            findings["dmarc"]["strict"] = False
+    record = next((item for item in dmarc_values if item.lower().startswith("v=dmarc1")), None)
+    posture["dmarc"]["present"] = bool(record)
+    posture["dmarc"]["record"] = record
+    if record:
+        lower = record.lower()
+        if "p=reject" in lower:
+            posture["dmarc"].update(policy="reject", strict=True)
+        elif "p=quarantine" in lower:
+            posture["dmarc"].update(policy="quarantine", strict=True)
+        elif "p=none" in lower:
+            posture["dmarc"].update(policy="none", strict=False)
         else:
-            findings["dmarc"]["policy"] = "unknown"
-            findings["dmarc"]["strict"] = False
-
-    return findings
+            posture["dmarc"].update(policy="unknown", strict=False)
+    return posture
 
 
 def _zone_transfer(domain, nameservers, timeout):
     results = {}
-    for ns in nameservers[:5]:
+    for ns in nameservers[:2]:
         try:
-            zone = dns.zone.from_xfr(dns.query.xfr(ns, domain, timeout=min(timeout, 4), lifetime=min(timeout, 6)))
-            if zone:
-                names = [str(name) for name in zone.nodes.keys()][:100]
-                results[ns] = {"status": "success", "records_exposed": len(names), "sample": names[:20]}
-            else:
-                results[ns] = {"status": "failed"}
+            zone = dns.zone.from_xfr(
+                dns.query.xfr(ns, domain, timeout=min(timeout, 4), lifetime=min(timeout, 6))
+            )
+            names = [str(name) for name in zone.nodes.keys()][:100] if zone else []
+            results[ns] = {
+                "status": "success" if zone else "failed",
+                "records_exposed": len(names),
+                "sample": names[:20],
+            }
         except Exception:
             results[ns] = {"status": "failed"}
     return results
@@ -185,113 +165,110 @@ def _zone_transfer(domain, nameservers, timeout):
 
 def run(url, domain, timeout=10):
     section("DNS Reconnaissance", "🔍")
-    results = {"records": {}, "security": {}, "zone_transfer": {}, "risks": [],
-               "dkim": {}, "dnssec": {}, "dangling_cnames": []}
-
+    results = {
+        "records": {},
+        "security": {},
+        "zone_transfer": {},
+        "risks": [],
+        "observations": [],
+        "dkim": {},
+        "dnssec": {},
+        "dangling_cnames": [],
+    }
     if not _DNS_AVAILABLE:
         error("dnspython not installed. Run: pip install dnspython")
         return {"error": "dnspython not installed"}
 
     resolver = _resolver(timeout)
-    nameservers = []
-
     record_data = {}
-    with ThreadPoolExecutor(max_workers=min(8, len(RECORD_TYPES))) as executor:
-        future_to_rtype = {executor.submit(_fetch_record, resolver, domain, rtype): rtype for rtype in RECORD_TYPES}
-        for future in as_completed(future_to_rtype):
-            rtype, values, err = future.result()
-            record_data[rtype] = (values, err)
+    with ThreadPoolExecutor(max_workers=len(RECORD_TYPES)) as executor:
+        futures = {
+            executor.submit(_fetch_record, resolver, domain, rtype): rtype
+            for rtype in RECORD_TYPES
+        }
+        for future in as_completed(futures):
+            rtype, values, failure = future.result()
+            record_data[rtype] = (values, failure)
 
+    nameservers = []
     for rtype in RECORD_TYPES:
-        values, err = record_data.get(rtype, ([], None))
-        if err == "NXDOMAIN":
+        values, failure = record_data.get(rtype, ([], None))
+        if failure == "NXDOMAIN":
             error(f"Domain '{domain}' does not exist.")
             return {"error": "NXDOMAIN"}
-        elif err:
-            warn(err)
-            results["records"][rtype] = []
+        if failure:
+            warn(f"{rtype} {failure}")
         elif values:
             info(rtype, ", ".join(values[:6]) + (f" ... (+{len(values)-6})" if len(values) > 6 else ""))
-            results["records"][rtype] = values
-            if rtype == "NS":
-                nameservers = [v.rstrip(".") for v in values]
         else:
             print(f"{Colors.DIM}[ ] {rtype}: No records{Colors.RESET}")
-            results["records"][rtype] = []
+        results["records"][rtype] = values
+        if rtype == "NS":
+            nameservers = [value.rstrip(".") for value in values]
 
-    txt_records = _extract_txt_like(results["records"].get("TXT", []))
-    security = _security_posture(domain, txt_records)
-    results["security"] = security
-
-    if not security["spf"]["present"]:
-        warn("SPF record missing — email spoofing possible.")
-        results["risks"].append("No SPF record")
+    posture = _security_posture(domain, _extract_txt_like(results["records"].get("TXT", [])), timeout)
+    results["security"] = posture
+    if not posture["spf"]["present"]:
+        warn("SPF record not present (email-domain posture observation).")
+        results["observations"].append("SPF record not present")
+    elif posture["spf"]["severity"] in {"CRITICAL", "MEDIUM", "LOW"}:
+        results["risks"].append(f"SPF policy: {posture['spf']['policy']}")
+        warn(f"SPF policy is {posture['spf']['policy']}")
     else:
-        policy = security["spf"].get("policy", "")
-        severity = security["spf"].get("severity", "")
-        if severity == "CRITICAL":
-            color = Colors.RED
-            warn("SPF policy '+all' — CRITICAL: anyone can send email as this domain!")
-            results["risks"].append("SPF +all: email spoofing fully open")
-        elif severity == "MEDIUM":
-            warn("SPF policy '?all' — neutral, offers no real protection.")
-            results["risks"].append("Weak SPF policy: ?all")
-        elif severity == "LOW":
-            warn("SPF policy '~all' (softfail) — mail may not be rejected.")
-            results["risks"].append("Weak SPF policy: ~all (softfail)")
-        elif severity == "PASS":
-            info("SPF", f"{Colors.GREEN}Present (-all, strict){Colors.RESET}")
-        else:
-            warn("SPF present but 'all' mechanism missing.")
+        info("SPF", "Strict policy detected")
 
-    if not security["dmarc"]["present"]:
-        warn("DMARC record missing — email spoofing protection absent.")
-        results["risks"].append("No DMARC record")
-    elif not security["dmarc"]["strict"]:
-        policy = security["dmarc"].get("policy", "none")
-        warn(f"DMARC present but policy is '{policy}' — not enforcing rejection.")
-        results["risks"].append(f"Weak DMARC policy: p={policy}")
+    if not posture["dmarc"]["present"]:
+        warn("DMARC record not present (email-domain posture observation).")
+        results["observations"].append("DMARC record not present")
+    elif not posture["dmarc"]["strict"]:
+        results["risks"].append(f"DMARC policy: {posture['dmarc']['policy']}")
+        warn(f"DMARC policy is {posture['dmarc']['policy']}")
     else:
-        policy = security["dmarc"].get("policy", "")
-        info("DMARC", f"{Colors.GREEN}Present (p={policy}){Colors.RESET}")
+        info("DMARC", f"Enforced policy p={posture['dmarc']['policy']}")
 
-    # --- DKIM ---
-    print(f"\n{Colors.BOLD}  DKIM Check:{Colors.RESET}")
+    print(f"\n{Colors.BOLD}  DKIM Discovery:{Colors.RESET}")
     dkim_found = _check_dkim(domain, timeout)
-    results["dkim"] = {"found_selectors": dkim_found}
+    results["dkim"] = {
+        "found_selectors": dkim_found,
+        "tested_selectors": list(DKIM_SELECTORS),
+        "complete": False,
+    }
     if dkim_found:
-        info("DKIM", f"{Colors.GREEN}Found on selectors: {', '.join(dkim_found)}{Colors.RESET}")
+        info("DKIM", f"Found on tested selector(s): {', '.join(dkim_found)}")
     else:
-        warn("No DKIM record found on common selectors — email integrity not guaranteed.")
-        results["risks"].append("No DKIM record found")
+        print(
+            f"  {Colors.DIM}[ ] No DKIM record discovered on the tested common selectors; DKIM absence is not proven.{Colors.RESET}"
+        )
 
-    # --- DNSSEC ---
     dnssec_enabled, ds_records = _check_dnssec(domain, timeout)
     results["dnssec"] = {"enabled": dnssec_enabled, "ds_records": ds_records}
     if dnssec_enabled:
-        info("DNSSEC", f"{Colors.GREEN}Enabled (DS records present){Colors.RESET}")
+        info("DNSSEC", "Enabled (DS records present)")
     else:
-        print(f"  {Colors.DIM}[ ] DNSSEC: Not enabled (informational){Colors.RESET}")
+        print(f"  {Colors.DIM}[ ] DNSSEC: no DS record observed{Colors.RESET}")
 
-    # --- Dangling CNAME detection ---
     cname_records = results["records"].get("CNAME", [])
     if cname_records:
-        dangling = _check_dangling_cnames(domain, cname_records, timeout)
+        dangling = _check_dangling_cnames(domain, cname_records)
         results["dangling_cnames"] = dangling
-        for d in dangling:
-            warn(f"Potential subdomain takeover — CNAME '{d['cname']}' points to unresolvable host: {d['target']}")
-            results["risks"].append(f"Dangling CNAME -> {d['target']}")
+        for item in dangling:
+            warn(
+                f"Dangling CNAME candidate: {item['cname']} -> {item['target']} (claimability not verified)"
+            )
 
-    # --- Zone transfer ---
     if nameservers:
-        print(f"\n{Colors.YELLOW}[!]{Colors.RESET} Attempting DNS zone transfer on up to {min(len(nameservers), 5)} nameserver(s)...")
+        print(
+            f"\n{Colors.YELLOW}[!]{Colors.RESET} Active DNS check: attempting AXFR on up to {min(len(nameservers), 2)} authoritative nameserver(s)..."
+        )
         zone_results = _zone_transfer(domain, nameservers, timeout)
-        results["zone_transfer"] = zone_results
+        results["zone_transfer"] = {
+            "active_probe": True,
+            "nameservers": zone_results,
+        }
         for ns, detail in zone_results.items():
             if detail.get("status") == "success":
-                warn(f"Zone transfer SUCCESSFUL on {ns} ({detail.get('records_exposed', 0)} records exposed).")
+                warn(f"Zone transfer succeeded on {ns} ({detail.get('records_exposed', 0)} records).")
                 results["risks"].append(f"Zone transfer enabled on {ns}")
             else:
                 print(f"{Colors.DIM}[ ] Zone transfer failed on {ns} (expected){Colors.RESET}")
-
     return results

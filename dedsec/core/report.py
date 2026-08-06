@@ -17,12 +17,20 @@ def _utc_now() -> str:
 
 
 def _module_summary(module_results: List[ModuleResult]) -> Dict[str, int]:
-    counts = {"total": len(module_results), "successful": 0, "failed": 0, "timed_out": 0}
+    counts = {
+        "total": len(module_results),
+        "successful": 0,
+        "failed": 0,
+        "timed_out": 0,
+        "aborted": 0,
+    }
     for item in module_results:
         if item.status == "success":
             counts["successful"] += 1
         elif item.status == "timeout":
             counts["timed_out"] += 1
+        elif item.status == "aborted":
+            counts["aborted"] += 1
         else:
             counts["failed"] += 1
     return counts
@@ -35,6 +43,7 @@ def build_report(
     module_results: Optional[List[ModuleResult]] = None,
     evidence_store: Optional[EvidenceStore] = None,
     correlated: Optional[Dict[str, Any]] = None,
+    runtime_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     modules = module_results or []
     correlation = correlated if correlated is not None else FindingsCorrelator().correlate(modules)
@@ -43,6 +52,7 @@ def build_report(
         "scan_id": evidence_store.scan_id if evidence_store else None,
         "generated_at": _utc_now(),
         "target": {"url": url, "domain": domain},
+        "runtime": redact_value(runtime_metadata or {}),
         "summary": {
             **_module_summary(modules),
             "verified_findings": len(correlation.get("verified_findings", [])),
@@ -99,6 +109,7 @@ def generate_report(
     module_results=None,
     evidence_store=None,
     correlated=None,
+    runtime_metadata=None,
 ):
     report_data = build_report(
         url=url,
@@ -107,6 +118,7 @@ def generate_report(
         module_results=module_results,
         evidence_store=evidence_store,
         correlated=correlated,
+        runtime_metadata=runtime_metadata,
     )
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n{Colors.BOLD}{Colors.CYAN}{'='*60}{Colors.RESET}")
@@ -115,12 +127,25 @@ def generate_report(
     print(f"{Colors.GREEN}[+]{Colors.RESET} Target:    {url}")
     print(f"{Colors.GREEN}[+]{Colors.RESET} Domain:    {domain}")
     print(f"{Colors.GREEN}[+]{Colors.RESET} Timestamp: {timestamp}")
-    print(f"{Colors.GREEN}[+]{Colors.RESET} Modules:   {report_data['summary']['total']} completed")
+    print(f"{Colors.GREEN}[+]{Colors.RESET} Modules:   {report_data['summary']['total']} terminal")
     print(
-        f"{Colors.GREEN}[+]{Colors.RESET} Verified:  "
-        f"{report_data['summary']['verified_findings']} | "
-        f"Hypotheses: {report_data['summary']['hypotheses']}"
+        f"{Colors.GREEN}[+]{Colors.RESET} Status:    "
+        f"{report_data['summary']['successful']} success | "
+        f"{report_data['summary']['failed']} failed | "
+        f"{report_data['summary']['timed_out']} timeout | "
+        f"{report_data['summary']['aborted']} aborted"
     )
+    print(
+        f"{Colors.GREEN}[+]{Colors.RESET} Findings:  "
+        f"{report_data['summary']['verified_findings']} verified | "
+        f"{report_data['summary']['hypotheses']} hypotheses"
+    )
+    runtime = report_data.get("runtime", {})
+    if "target_http_requests_used" in runtime:
+        print(
+            f"{Colors.GREEN}[+]{Colors.RESET} Target HTTP requests: "
+            f"{runtime['target_http_requests_used']} / {runtime.get('target_http_request_budget', 'unbounded')}"
+        )
     print(f"{Colors.BOLD}{Colors.CYAN}{'='*60}{Colors.RESET}\n")
 
     if json_output:

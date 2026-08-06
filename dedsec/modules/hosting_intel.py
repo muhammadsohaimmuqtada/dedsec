@@ -12,11 +12,14 @@ PROVIDER_PATTERNS = {
     "OVH": ["ovh"],
     "Hetzner": ["hetzner"],
     "Akamai": ["akamai"],
+    "Namecheap": ["namecheap", "namecheap-net"],
+    "Linode/Akamai Connected Cloud": ["linode"],
+    "Vultr": ["vultr", "choopa"],
 }
 
 
-def _classify_provider(asn_text, org_text):
-    haystack = f"{asn_text} {org_text}".lower()
+def _classify_provider(*parts):
+    haystack = " ".join(str(part or "") for part in parts).lower()
     for provider, patterns in PROVIDER_PATTERNS.items():
         if any(pattern in haystack for pattern in patterns):
             return provider
@@ -32,29 +35,29 @@ def _reverse_dns(ip):
 
 def _ip_metadata(ip, timeout):
     api_url = f"http://ip-api.com/json/{ip}?fields=status,message,isp,org,as,asname,hosting,proxy,mobile"
-    resp = safe_request(api_url, timeout=timeout)
-    if not resp:
-        return {"error": "metadata request failed"}
-
+    response = safe_request(api_url, timeout=timeout, cache=False)
+    if response is None:
+        return {"error": "metadata transport failure"}
     try:
-        data = resp.json()
+        data = response.json()
     except Exception:
-        return {"error": "invalid metadata response"}
-
+        return {"error": "invalid metadata response", "status": response.status_code}
     if data.get("status") != "success":
-        return {"error": data.get("message", "metadata error")}
+        return {"error": data.get("message", "metadata error"), "status": response.status_code}
 
     asn = data.get("as", "N/A")
+    as_name = data.get("asname", "N/A")
+    isp = data.get("isp", "N/A")
     org = data.get("org", "N/A")
     return {
-        "isp": data.get("isp", "N/A"),
+        "isp": isp,
         "org": org,
         "asn": asn,
-        "as_name": data.get("asname", "N/A"),
+        "as_name": as_name,
         "hosting": bool(data.get("hosting", False)),
         "proxy": bool(data.get("proxy", False)),
         "mobile": bool(data.get("mobile", False)),
-        "provider_guess": _classify_provider(asn, org),
+        "provider_guess": _classify_provider(asn, as_name, isp, org),
     }
 
 
@@ -62,20 +65,21 @@ def run(url, domain, timeout=10):
     section("Hosting Intelligence", "🏢")
     results = {"ips": [], "cdn_signals": [], "provider_summary": []}
 
-    resp = safe_request(url, timeout=timeout)
-    headers = {k.lower(): v.lower() for k, v in (resp.headers.items() if resp else [])}
-
-    cdn_signals = []
+    response = safe_request(url, timeout=timeout)
+    headers = {
+        key.lower(): value.lower()
+        for key, value in (response.headers.items() if response is not None else [])
+    }
+    signals = []
     if "cf-ray" in headers or "cloudflare" in headers.get("server", ""):
-        cdn_signals.append("Cloudflare edge detected")
+        signals.append("Cloudflare edge detected")
     if "x-amz-cf-id" in headers or "cloudfront" in headers.get("via", ""):
-        cdn_signals.append("CloudFront edge detected")
+        signals.append("CloudFront edge detected")
     if "akamai" in headers.get("server", "") or "x-akamai-transformed" in headers:
-        cdn_signals.append("Akamai edge detected")
-
-    for signal in cdn_signals:
+        signals.append("Akamai edge detected")
+    results["cdn_signals"] = signals
+    for signal in signals:
         info("CDN Signal", signal)
-    results["cdn_signals"] = cdn_signals
 
     ips = list(cached_resolve_ips(domain))
     if not ips:
@@ -84,27 +88,28 @@ def run(url, domain, timeout=10):
 
     provider_counts = {}
     for ip in ips:
-        rdns = _reverse_dns(ip)
+        reverse_dns = _reverse_dns(ip)
         metadata = _ip_metadata(ip, timeout)
         provider = metadata.get("provider_guess", "Unknown/Unclassified")
         provider_counts[provider] = provider_counts.get(provider, 0) + 1
-
         info("Resolved IP", ip)
-        if rdns:
-            info("Reverse DNS", rdns)
+        if reverse_dns:
+            info("Reverse DNS", reverse_dns)
         if "error" in metadata:
             warn(f"Metadata unavailable for {ip}: {metadata['error']}")
         else:
             info("Provider Guess", provider)
             print(
-                f"{Colors.DIM}    ASN={metadata['asn']} ISP={metadata['isp']} Hosting={metadata['hosting']} "
-                f"Proxy={metadata['proxy']}{Colors.RESET}"
+                f"{Colors.DIM}    ASN={metadata['asn']} ISP={metadata['isp']} "
+                f"Hosting={metadata['hosting']} Proxy={metadata['proxy']}{Colors.RESET}"
             )
+        results["ips"].append({"ip": ip, "reverse_dns": reverse_dns, "metadata": metadata})
 
-        results["ips"].append({"ip": ip, "reverse_dns": rdns, "metadata": metadata})
-
-    summary = [f"{name}: {count}" for name, count in sorted(provider_counts.items(), key=lambda item: (-item[1], item[0]))]
+    summary = [
+        f"{name}: {count}"
+        for name, count in sorted(provider_counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    results["provider_summary"] = summary
     if summary:
         info("Provider Summary", ", ".join(summary))
-    results["provider_summary"] = summary
     return results

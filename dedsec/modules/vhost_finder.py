@@ -1,78 +1,113 @@
-import socket
-from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import requests
+
 from dedsec.core.colors import Colors
-from dedsec.core.utils import cached_resolve_ipv4, section, info, warn, error, _get_headers
+from dedsec.core.utils import cached_resolve_ipv4, info, safe_request, section, warn
 
 VHOST_SUBDOMAINS = [
     "dev", "staging", "internal", "admin", "test", "stage", "uat",
-    "portal", "api", "app", "corp", "mgmt", "console", "private"
+    "portal", "api", "app", "corp", "mgmt", "console", "private",
 ]
 
-def run(url, domain, timeout=10):
-    section("Virtual Host Finder", "🖥️")
-    results = {"vhosts_found": [], "ip_tested": None}
 
+def _signature(response):
+    text = response.text or ""
+    return {
+        "status": response.status_code,
+        "length": len(text),
+        "location": response.headers.get("Location", ""),
+    }
+
+
+def _distinct(candidate, baseline):
+    if candidate["status"] != baseline["status"]:
+        return True
+    base_length = max(baseline["length"], 1)
+    if abs(candidate["length"] - baseline["length"]) / base_length > 0.20:
+        return True
+    return candidate["location"] != baseline["location"]
+
+
+def run(url, domain, timeout=10):
+    section("Virtual Host Candidate Finder", "🖥️")
+    results = {
+        "vhosts_found": [],
+        "candidates": [],
+        "ip_tested": None,
+        "transport_failures": 0,
+        "probe_scheme": "http",
+    }
     ip = cached_resolve_ipv4(domain)
     if not ip:
-        error(f"Could not resolve target IP for {domain}.")
+        warn(f"Could not resolve target IP for {domain}.")
         return results
-
     results["ip_tested"] = ip
     info("Target IP Address", ip)
 
-    scheme = urlparse(url).scheme or "https"
-    base_target = f"{scheme}://{ip}"
-
-    # Get baseline response connecting directly to IP
-    try:
-        base_resp = requests.get(base_target, headers={"Host": domain, **_get_headers()}, timeout=timeout, verify=False)
-        base_status = base_resp.status_code
-        base_len = len(base_resp.text)
-    except Exception:
-        warn("Failed to obtain baseline response from direct IP connection.")
+    # Direct-IP Host-header probing is explicitly scoped to the already-resolved
+    # target IP. HTTP is used so TLS verification/SNI is never disabled or faked.
+    base_target = f"http://{ip}/"
+    base_response = safe_request(
+        base_target,
+        headers={"Host": domain},
+        timeout=timeout,
+        allow_redirects=False,
+        cache=False,
+        external_request=True,
+    )
+    if base_response is None:
+        warn("Could not obtain a direct-IP HTTP baseline; vhost discovery is inconclusive.")
+        results["transport_failures"] += 1
         return results
+    baseline = _signature(base_response)
 
-    print(f"  Fuzzing Host headers on {ip} for domain {domain}...")
-    vhosts_found = []
+    print(f"  Comparing bounded Host-header responses on {ip} for domain {domain}...")
 
-    def _test_vhost(prefix):
-        vhost_name = f"{prefix}.{domain}"
-        try:
-            resp = requests.get(
-                base_target,
-                headers={"Host": vhost_name, **_get_headers()},
-                timeout=timeout,
-                verify=False
-            )
-            len_diff = abs(len(resp.text) - base_len)
-            # If status code changes or body length changes significantly (>15% diff)
-            if resp.status_code != base_status or len_diff > (base_len * 0.15):
-                return {
-                    "vhost": vhost_name,
-                    "status": resp.status_code,
-                    "length": len(resp.text),
-                    "base_status": base_status,
-                    "base_length": base_len
-                }
-        except Exception:
-            pass
-        return None
+    def _test(prefix):
+        vhost = f"{prefix}.{domain}"
+        response = safe_request(
+            base_target,
+            headers={"Host": vhost},
+            timeout=timeout,
+            allow_redirects=False,
+            cache=False,
+            external_request=True,
+        )
+        if response is None:
+            return {"vhost": vhost, "transport_failure": True}
+        signature = _signature(response)
+        if not _distinct(signature, baseline):
+            return None
+        return {
+            "vhost": vhost,
+            "status": signature["status"],
+            "length": signature["length"],
+            "location": signature["location"],
+            "base_status": baseline["status"],
+            "base_length": baseline["length"],
+            "classification": "response-difference-candidate",
+            "verified": False,
+        }
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(_test_vhost, prefix): prefix for prefix in VHOST_SUBDOMAINS}
+    candidates = []
+    with ThreadPoolExecutor(max_workers=min(8, len(VHOST_SUBDOMAINS))) as executor:
+        futures = [executor.submit(_test, prefix) for prefix in VHOST_SUBDOMAINS]
         for future in as_completed(futures):
-            res = future.result()
-            if res:
-                vhosts_found.append(res)
+            item = future.result()
+            if item and item.get("transport_failure"):
+                results["transport_failures"] += 1
+            elif item:
+                candidates.append(item)
 
-    results["vhosts_found"] = vhosts_found
-    if vhosts_found:
-        print(f"\n{Colors.GREEN}[+]{Colors.RESET} {Colors.BOLD}Virtual Hosts Discovered:{Colors.RESET}")
-        for v in vhosts_found:
-            warn(f"Discovered VHost: {Colors.CYAN}{v['vhost']}{Colors.RESET} (Status {v['status']} vs Base {v['base_status']}, Length {v['length']} vs Base {v['base_length']})")
+    candidates.sort(key=lambda item: item["vhost"])
+    results["candidates"] = candidates
+    results["vhosts_found"] = candidates
+    if candidates:
+        print(f"\n{Colors.YELLOW}[!]{Colors.RESET} {Colors.BOLD}VHost Response-Difference Candidates:{Colors.RESET}")
+        for item in candidates:
+            warn(
+                f"Candidate {item['vhost']}: status {item['status']} vs {item['base_status']}, "
+                f"length {item['length']} vs {item['base_length']} (not DNS/ownership verified)"
+            )
     else:
-        info("VHost Check", f"{Colors.GREEN}No distinct virtual hosts identified on IP {ip}{Colors.RESET}")
-
+        info("VHost Check", f"{Colors.GREEN}No distinct Host-header responses identified on {ip}{Colors.RESET}")
     return results
