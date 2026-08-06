@@ -1,7 +1,7 @@
 import copy
 import json
 import os
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlencode, urljoin, urlsplit, urlunsplit
 
 from dedsec.core.workspace import (
@@ -9,6 +9,7 @@ from dedsec.core.workspace import (
     RequestRecord,
     ResearchWorkspace,
     infer_insertion_points,
+    merge_insertion_points,
 )
 
 try:
@@ -61,34 +62,47 @@ def _sample_scalar(schema: Dict[str, Any], name: str = "value") -> Any:
     lowered = (name or "").lower()
     if lowered.endswith("id") or lowered == "id":
         return "1"
+    if value_type == "file":
+        return "[file-placeholder]"
     return "sample"
 
 
-def _point_key(point: InsertionPoint) -> Tuple[str, str]:
-    return point.location.lower(), point.name
+def _as_list(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def _is_json_media_type(value: Optional[str]) -> bool:
+    media = str(value or "").split(";", 1)[0].strip().lower()
+    return media == "application/json" or media.endswith("+json")
 
 
 class OpenAPIImporter:
-    """Convert OpenAPI/Swagger definitions into non-executed request corpus entries.
+    """Convert OpenAPI/Swagger definitions into a non-executed request corpus.
 
-    Local JSON-Pointer references are resolved with bounded recursion. Remote or
-    file references are never fetched automatically; they are surfaced as
-    unresolved coverage metadata instead. Researcher-prepared identity headers
-    may be attached to request records, but are redacted at persistence/report
-    boundaries by the shared evidence redactor.
+    Local JSON-Pointer references are resolved with bounded recursion. Remote
+    and file references are never fetched automatically; unresolved references
+    remain explicit coverage metadata. State-changing operations are modeled,
+    tagged, and never executed by the importer.
     """
 
-    def __init__(self, target_url: str, scope=None, default_headers: Optional[Dict[str, str]] = None):
+    def __init__(
+        self,
+        target_url: str,
+        scope=None,
+        default_headers: Optional[Dict[str, str]] = None,
+    ):
         self.target_url = target_url
         self.scope = scope
         self.default_headers = {str(k): str(v) for k, v in (default_headers or {}).items()}
         self._spec: Dict[str, Any] = {}
         self._unresolved_refs: List[str] = []
 
-    def _note_unresolved(self, ref: str) -> None:
-        value = str(ref or "")
-        if value and value not in self._unresolved_refs:
-            self._unresolved_refs.append(value)
+    def _note_unresolved(self, value: str) -> None:
+        text = str(value or "")
+        if text and text not in self._unresolved_refs:
+            self._unresolved_refs.append(text)
 
     def _pointer(self, ref: str) -> Optional[Any]:
         if not ref.startswith("#/"):
@@ -130,20 +144,16 @@ class OpenAPIImporter:
                 }
             target = self._pointer(ref_text)
             siblings = {str(key): item for key, item in value.items() if key != "$ref"}
-            if target is None:
+            if target is None or not isinstance(target, dict):
+                if target is not None:
+                    self._note_unresolved(ref_text + " [non-object]")
                 return {
                     key: self._resolve(item, depth + 1, stack)
                     for key, item in siblings.items()
                 }
-            base = copy.deepcopy(target)
-            if not isinstance(base, dict):
-                self._note_unresolved(ref_text + " [non-object]")
-                return {
-                    key: self._resolve(item, depth + 1, stack)
-                    for key, item in siblings.items()
-                }
-            base.update(siblings)
-            return self._resolve(base, depth + 1, stack + (ref_text,))
+            merged = copy.deepcopy(target)
+            merged.update(siblings)
+            return self._resolve(merged, depth + 1, stack + (ref_text,))
 
         return {
             str(key): self._resolve(item, depth + 1, stack)
@@ -153,7 +163,7 @@ class OpenAPIImporter:
     def _sample_schema(self, schema: Any, depth: int = 0) -> Any:
         if depth > 6:
             return None
-        resolved = self._resolve(schema, depth=0)
+        resolved = self._resolve(schema)
         if not isinstance(resolved, dict):
             return None
         if "example" in resolved:
@@ -165,24 +175,25 @@ class OpenAPIImporter:
         schema_type = resolved.get("type")
         if schema_type == "object" or isinstance(resolved.get("properties"), dict):
             return {
-                str(name): self._sample_schema(value, depth + 1)
-                for name, value in sorted((resolved.get("properties") or {}).items())
+                str(name): self._sample_schema(item, depth + 1)
+                for name, item in sorted((resolved.get("properties") or {}).items())
             }
         if schema_type == "array":
             item = self._sample_schema(resolved.get("items") or {}, depth + 1)
             return [] if item is None else [item]
-        for composition in ("oneOf", "anyOf", "allOf"):
+        for composition in ("allOf", "oneOf", "anyOf"):
             options = resolved.get(composition)
-            if isinstance(options, list) and options:
-                if composition == "allOf":
-                    merged: Dict[str, Any] = {}
-                    for option in options:
-                        sampled = self._sample_schema(option, depth + 1)
-                        if isinstance(sampled, dict):
-                            merged.update(sampled)
-                    if merged:
-                        return merged
-                return self._sample_schema(options[0], depth + 1)
+            if not isinstance(options, list) or not options:
+                continue
+            if composition == "allOf":
+                merged: Dict[str, Any] = {}
+                for option in options:
+                    sampled = self._sample_schema(option, depth + 1)
+                    if isinstance(sampled, dict):
+                        merged.update(sampled)
+                if merged:
+                    return merged
+            return self._sample_schema(options[0], depth + 1)
         return _sample_scalar(resolved)
 
     def _parameter_sample(self, parameter: Dict[str, Any]) -> Any:
@@ -202,17 +213,13 @@ class OpenAPIImporter:
     def _merge_parameters(self, *groups: Any) -> List[Dict[str, Any]]:
         merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
         for group in groups:
-            resolved_group = self._resolve(group or [])
-            for parameter in resolved_group or []:
-                if not isinstance(parameter, dict):
-                    continue
-                resolved = self._resolve(parameter)
+            for raw in self._resolve(group or []) or []:
+                resolved = self._resolve(raw)
                 if not isinstance(resolved, dict):
                     continue
                 key = (str(resolved.get("in") or ""), str(resolved.get("name") or ""))
-                if not key[1]:
-                    continue
-                merged[key] = resolved
+                if key[1]:
+                    merged[key] = resolved
         return [merged[key] for key in sorted(merged)]
 
     def _base_url(self, spec: Dict[str, Any]) -> str:
@@ -228,54 +235,39 @@ class OpenAPIImporter:
                 else:
                     return urljoin(self.target_url, raw).rstrip("/") + "/"
         if spec.get("swagger"):
-            scheme = "https"
-            schemes = spec.get("schemes")
-            if isinstance(schemes, list) and schemes:
-                scheme = str(schemes[0])
-            host = spec.get("host") or urlsplit(self.target_url).netloc
+            schemes = _as_list(spec.get("schemes") or [urlsplit(self.target_url).scheme or "https"])
+            scheme = str(schemes[0])
+            host = str(spec.get("host") or urlsplit(self.target_url).netloc)
             base_path = str(spec.get("basePath") or "/")
             return "%s://%s%s" % (scheme, host, base_path.rstrip("/"))
         return self.target_url.rstrip("/") + "/"
 
     def _security_metadata(self, spec: Dict[str, Any]) -> Dict[str, Any]:
-        schemes = {}
         components = self._resolve(spec.get("components") or {})
         raw = components.get("securitySchemes") if isinstance(components, dict) else None
         if not raw and spec.get("swagger"):
             raw = spec.get("securityDefinitions")
-        resolved_raw = self._resolve(raw or {})
-        for name, definition in (resolved_raw or {}).items():
-            if not isinstance(definition, dict):
-                continue
-            schemes[str(name)] = {
-                "type": definition.get("type"),
-                "scheme": definition.get("scheme"),
-                "in": definition.get("in"),
-                "name": definition.get("name"),
-                "bearer_format": definition.get("bearerFormat"),
-            }
+        schemes: Dict[str, Any] = {}
+        for name, definition in (self._resolve(raw or {}) or {}).items():
+            if isinstance(definition, dict):
+                schemes[str(name)] = {
+                    "type": definition.get("type"),
+                    "scheme": definition.get("scheme"),
+                    "in": definition.get("in"),
+                    "name": definition.get("name"),
+                    "bearer_format": definition.get("bearerFormat"),
+                }
         return schemes
 
     def _scope_allowed(self, url: str) -> bool:
-        if self.scope is None:
-            target = urlsplit(self.target_url)
-            candidate = urlsplit(url)
-            return (
-                candidate.scheme in {"http", "https"}
-                and (candidate.hostname or "").lower() == (target.hostname or "").lower()
-            )
-        return bool(self.scope.check_url(url).allowed)
-
-    @staticmethod
-    def _merge_points(
-        explicit: Sequence[InsertionPoint], inferred: Sequence[InsertionPoint]
-    ) -> List[InsertionPoint]:
-        merged: Dict[Tuple[str, str], InsertionPoint] = {
-            _point_key(item): item for item in inferred
-        }
-        for item in explicit:
-            merged[_point_key(item)] = item
-        return [merged[key] for key in sorted(merged)]
+        if self.scope is not None:
+            return bool(self.scope.check_url(url).allowed)
+        target = urlsplit(self.target_url)
+        candidate = urlsplit(url)
+        return (
+            candidate.scheme in {"http", "https"}
+            and (candidate.hostname or "").lower() == (target.hostname or "").lower()
+        )
 
     @staticmethod
     def _set_sample_header(headers: Dict[str, str], name: str, value: Any) -> None:
@@ -283,6 +275,17 @@ class OpenAPIImporter:
         if any(str(existing).lower() == lowered for existing in headers):
             return
         headers[str(name)] = str(value)
+
+    @staticmethod
+    def _swagger_content_type(spec: Dict[str, Any], operation: Dict[str, Any], form_data: bool) -> str:
+        consumes = [str(item).lower() for item in _as_list(operation.get("consumes") or spec.get("consumes"))]
+        if form_data:
+            if "multipart/form-data" in consumes:
+                return "multipart/form-data"
+            return "application/x-www-form-urlencoded"
+        if consumes:
+            return consumes[0]
+        return "application/json"
 
     def ingest(
         self,
@@ -296,15 +299,16 @@ class OpenAPIImporter:
         paths = spec.get("paths")
         if not isinstance(paths, dict):
             raise ValueError("API specification does not contain a paths object")
+
         base_url = self._base_url(spec)
+        security_schemes = self._security_metadata(spec)
+        if security_schemes:
+            workspace.metadata.setdefault("api_auth_schemes", {}).update(security_schemes)
+
         imported = 0
         state_changing = 0
         out_of_scope = 0
         methods: Dict[str, int] = {}
-
-        security_schemes = self._security_metadata(spec)
-        if security_schemes:
-            workspace.metadata.setdefault("api_auth_schemes", {}).update(security_schemes)
 
         for path_template, raw_path_item in sorted(paths.items()):
             path_item = self._resolve(raw_path_item)
@@ -317,14 +321,17 @@ class OpenAPIImporter:
                 operation = self._resolve(raw_operation)
                 if not isinstance(operation, dict):
                     continue
+
                 method = method_name.upper()
                 parameters = self._merge_parameters(path_parameters, operation.get("parameters"))
                 rendered_path = str(path_template)
                 query: List[Tuple[str, Any]] = []
-                headers: Dict[str, str] = dict(self.default_headers)
+                headers = dict(self.default_headers)
                 explicit_points: List[InsertionPoint] = []
                 body: Any = None
                 content_type: Optional[str] = None
+                swagger_form: Dict[str, Any] = {}
+                swagger_body_parameter: Optional[Dict[str, Any]] = None
 
                 for parameter in parameters:
                     name = str(parameter.get("name") or "")
@@ -333,19 +340,28 @@ class OpenAPIImporter:
                         continue
                     sample = self._parameter_sample(parameter)
                     schema = self._resolve(parameter.get("schema") or {})
+                    value_type = str(
+                        schema.get("type")
+                        if isinstance(schema, dict) and schema.get("type")
+                        else parameter.get("type") or "string"
+                    )
+
+                    if location == "body":
+                        swagger_body_parameter = parameter
+                        continue
+                    point_location = "body" if location == "formdata" else location
                     explicit_points.append(
                         InsertionPoint(
-                            location=location,
+                            location=point_location,
                             name=name,
                             value=sample,
-                            value_type=str(
-                                schema.get("type")
-                                if isinstance(schema, dict) and schema.get("type")
-                                else parameter.get("type") or "string"
-                            ),
+                            value_type=value_type,
                             required=bool(parameter.get("required")),
                             source=source,
-                            metadata={"path_template": path_template},
+                            metadata={
+                                "path_template": path_template,
+                                "parameter_in": location,
+                            },
                         )
                     )
                     if location == "path":
@@ -354,6 +370,8 @@ class OpenAPIImporter:
                         query.append((name, sample))
                     elif location == "header":
                         self._set_sample_header(headers, name, sample)
+                    elif location == "formdata":
+                        swagger_form[name] = sample
 
                 request_body = self._resolve(operation.get("requestBody"))
                 if isinstance(request_body, dict):
@@ -375,11 +393,38 @@ class OpenAPIImporter:
                         if body is None and isinstance(media, dict):
                             body = self._sample_schema(media.get("schema") or {})
                         content_type = preferred
+                        if not _is_json_media_type(preferred) and preferred not in {
+                            "application/x-www-form-urlencoded",
+                            "multipart/form-data",
+                        }:
+                            explicit_points.append(
+                                InsertionPoint(
+                                    location="body",
+                                    name="$body",
+                                    value=body,
+                                    value_type="opaque",
+                                    source=source,
+                                    metadata={"media_type": preferred},
+                                )
+                            )
                 elif spec.get("swagger"):
-                    for parameter in parameters:
-                        if parameter.get("in") == "body":
-                            body = self._sample_schema(parameter.get("schema") or {})
-                            content_type = "application/json"
+                    if swagger_form:
+                        body = swagger_form
+                        content_type = self._swagger_content_type(spec, operation, form_data=True)
+                    elif swagger_body_parameter is not None:
+                        body = self._sample_schema(swagger_body_parameter.get("schema") or {})
+                        content_type = self._swagger_content_type(spec, operation, form_data=False)
+                        if not _is_json_media_type(content_type):
+                            explicit_points.append(
+                                InsertionPoint(
+                                    location="body",
+                                    name="$body",
+                                    value=body,
+                                    value_type="opaque",
+                                    source=source,
+                                    metadata={"media_type": content_type},
+                                )
+                            )
 
                 target = urljoin(base_url, rendered_path.lstrip("/"))
                 if query:
@@ -396,7 +441,7 @@ class OpenAPIImporter:
                     content_type=content_type,
                     source=source,
                 )
-                points = self._merge_points(explicit_points, inferred_points)
+                points = merge_insertion_points(inferred_points, explicit_points)
 
                 tags = ["api-spec", "not-executed"]
                 if method not in {"GET", "HEAD", "OPTIONS"}:
@@ -428,6 +473,7 @@ class OpenAPIImporter:
                     },
                 )
                 workspace.add_request(request)
+
                 endpoint_id = workspace.add_asset(
                     "endpoint",
                     urljoin(base_url, str(path_template).lstrip("/")),
@@ -442,6 +488,7 @@ class OpenAPIImporter:
                 if scope_allowed:
                     domain_id = workspace.add_asset("domain", workspace.domain, source=source)
                     workspace.add_edge(domain_id, endpoint_id, "exposes_api", {"method": method})
+
                 imported += 1
                 methods[method] = methods.get(method, 0) + 1
 
