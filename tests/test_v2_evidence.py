@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import types
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -118,6 +119,29 @@ class EvidenceV2Tests(unittest.TestCase):
         self.assertEqual(module_results[0].attempts, 2)
         self.assertEqual(module_results[0].status, "success")
         self.assertEqual(len(module_results[0].evidence_ids), 1)
+
+    def test_global_timeout_records_one_terminal_evidence_item(self):
+        name = "tests.fake_slow_module"
+        module = types.ModuleType(name)
+
+        def run(url, domain, timeout):
+            time.sleep(0.03)
+            return {"late": True}
+
+        module.run = run
+        store = EvidenceStore(scan_id="scan-timeout")
+        with patch.dict(sys.modules, {name: module}):
+            results, module_results = run_modules(
+                ["slow"],
+                {"slow": (name, "Slow")},
+                "https://example.com",
+                "example.com",
+                ScanConfig(global_timeout=0.005, backoff=0, concurrency=1),
+                evidence_store=store,
+            )
+        self.assertEqual(module_results[0].status, "timeout")
+        self.assertEqual(results["slow"]["error"], "Global scan timeout exceeded")
+        self.assertEqual(len(store.snapshot()), 1)
 
     def test_report_preserves_negative_results_and_redacts_raw_results(self):
         store = EvidenceStore(scan_id="scan-report")
