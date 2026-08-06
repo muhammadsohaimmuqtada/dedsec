@@ -1,9 +1,14 @@
 import json
 import os
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 
-from dedsec.core.workspace import InsertionPoint, RequestRecord, ResearchWorkspace
+from dedsec.core.workspace import (
+    InsertionPoint,
+    RequestRecord,
+    ResearchWorkspace,
+    endpoint_key,
+)
 
 try:
     import yaml
@@ -88,9 +93,7 @@ def _merge_parameters(*groups: Any) -> List[Dict[str, Any]]:
     merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
     for group in groups:
         for parameter in group or []:
-            if not isinstance(parameter, dict):
-                continue
-            if "$ref" in parameter:
+            if not isinstance(parameter, dict) or "$ref" in parameter:
                 continue
             key = (str(parameter.get("in") or ""), str(parameter.get("name") or ""))
             merged[key] = parameter
@@ -119,7 +122,7 @@ class OpenAPIImporter:
                 scheme = str(schemes[0])
             host = spec.get("host") or urlsplit(self.target_url).netloc
             base_path = str(spec.get("basePath") or "/")
-            return "%s://%s%s" % (scheme, host, base_path.rstrip("/"))
+            return ("%s://%s%s" % (scheme, host, base_path.rstrip("/"))).rstrip("/") + "/"
         return self.target_url.rstrip("/") + "/"
 
     @staticmethod
@@ -187,7 +190,11 @@ class OpenAPIImporter:
                             location=location,
                             name=name,
                             value=sample,
-                            value_type=str((parameter.get("schema") or {}).get("type") or parameter.get("type") or "string"),
+                            value_type=str(
+                                (parameter.get("schema") or {}).get("type")
+                                or parameter.get("type")
+                                or "string"
+                            ),
                             required=bool(parameter.get("required")),
                             source=source,
                             metadata={"path_template": path_template},
@@ -266,9 +273,10 @@ class OpenAPIImporter:
                     },
                 )
                 workspace.add_request(request)
-                endpoint_id = workspace.add_asset(
+                template_url = urljoin(base_url, str(path_template).lstrip("/"))
+                api_endpoint_id = workspace.add_asset(
                     "endpoint",
-                    urljoin(base_url, str(path_template).lstrip("/")),
+                    endpoint_key(method, template_url, path_template=str(path_template)),
                     attributes={
                         "path_template": path_template,
                         "method": method,
@@ -277,7 +285,12 @@ class OpenAPIImporter:
                     source=source,
                 )
                 domain_id = workspace.add_asset("domain", workspace.domain, source=source)
-                workspace.add_edge(domain_id, endpoint_id, "exposes_api", {"method": method})
+                workspace.add_edge(
+                    domain_id,
+                    api_endpoint_id,
+                    "exposes_api",
+                    {"method": method},
+                )
                 imported += 1
                 methods[method] = methods.get(method, 0) + 1
 

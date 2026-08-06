@@ -91,13 +91,21 @@ class _SurfaceParser(HTMLParser):
 
 
 _JS_URL_PATTERNS = [
-    re.compile(r"(?:fetch|axios\.(?:get|post|put|patch|delete))\s*\(\s*['\"]([^'\"]+)['\"]", re.I),
-    re.compile(r"\.open\s*\(\s*['\"](?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)['\"]\s*,\s*['\"]([^'\"]+)['\"]", re.I),
+    re.compile(
+        r"(?:fetch|axios\.(?:get|post|put|patch|delete))\s*\(\s*['\"]([^'\"]+)['\"]",
+        re.I,
+    ),
+    re.compile(
+        r"\.open\s*\(\s*['\"](?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)['\"]\s*,\s*['\"]([^'\"]+)['\"]",
+        re.I,
+    ),
 ]
 
 
 class CrawlerEngine:
     """Bounded, same-scope crawler that discovers surfaces without submitting forms."""
+
+    SENSITIVE_HEADERS = {"authorization", "proxy-authorization", "cookie"}
 
     def __init__(
         self,
@@ -111,8 +119,13 @@ class CrawlerEngine:
         self.workspace = workspace
         self.config = config or CrawlConfig()
         self.passive = passive or PassivePipeline()
-        self.default_headers = dict(default_headers or {})
+        self.default_headers = {
+            str(k): str(v)
+            for k, v in (default_headers or {}).items()
+            if str(k).lower() not in self.SENSITIVE_HEADERS
+        }
         self.default_headers.setdefault("User-Agent", self.config.user_agent)
+        self.identity_id = getattr(context, "identity_id", "identity-anonymous")
         self._transport = context.get_transport()
 
     @staticmethod
@@ -128,7 +141,9 @@ class CrawlerEngine:
         lowered = (raw or "").strip().lower()
         if not lowered:
             return False
-        return not lowered.startswith(("mailto:", "tel:", "javascript:", "data:", "blob:", "#"))
+        return not lowered.startswith(
+            ("mailto:", "tel:", "javascript:", "data:", "blob:", "#")
+        )
 
     def _in_scope_url(self, base_url: str, raw: str) -> Optional[str]:
         if not self._is_http_candidate(raw):
@@ -174,6 +189,7 @@ class CrawlerEngine:
             request_url,
             body=body,
             content_type=content_type,
+            identity_id=self.identity_id,
             source="html-form",
             insertion_points=points,
             tags=["form", "not-submitted"],
@@ -184,7 +200,11 @@ class CrawlerEngine:
         )
         self.workspace.add_request(request)
         page_id = self.workspace.add_asset("url", page_url, source="crawler")
-        endpoint_id = self.workspace.add_asset("endpoint", request.url, source="html-form")
+        endpoint_id = self.workspace.add_asset(
+            "endpoint",
+            "%s %s" % (request.method, urlsplit(request.url)._replace(query="", fragment="").geturl()),
+            source="html-form",
+        )
         self.workspace.add_edge(
             page_id,
             endpoint_id,
@@ -206,9 +226,7 @@ class CrawlerEngine:
         start = canonical_url(start_url)
         queue: Deque[Tuple[str, int, Optional[str], str]] = deque()
         queue.append((start, 0, None, "seed"))
-        queued: Set[str] = {
-            self._queue_key(start, self.config.allow_query_variants)
-        }
+        queued: Set[str] = {self._queue_key(start, self.config.allow_query_variants)}
         visited: Set[str] = set()
         pages = 0
         transport_failures = 0
@@ -231,6 +249,7 @@ class CrawlerEngine:
                 "GET",
                 url,
                 headers=self.default_headers,
+                identity_id=self.identity_id,
                 source="crawler",
                 tags=["crawl", source],
                 metadata={"depth": depth, "parent_url": parent_url},
@@ -252,9 +271,8 @@ class CrawlerEngine:
             if outcome.response is None:
                 transport_failures += 1
                 self.workspace.coverage.skip_request(
-                    "transport:%s" % (
-                        outcome.failure.category if outcome.failure is not None else "unknown"
-                    ),
+                    "transport:%s"
+                    % (outcome.failure.category if outcome.failure is not None else "unknown"),
                     len(request.insertion_points),
                 )
                 continue
@@ -297,7 +315,12 @@ class CrawlerEngine:
             )
             host = urlsplit(response_record.url).hostname or ""
             host_id = self.workspace.add_asset("host", host, source="crawler")
-            self.workspace.add_edge(host_id, page_id, "serves", {"status": response_record.status_code})
+            self.workspace.add_edge(
+                host_id,
+                page_id,
+                "serves",
+                {"status": response_record.status_code},
+            )
 
             if "html" in content_type or "<html" in text[:4096].lower():
                 parser = _SurfaceParser()
@@ -329,7 +352,12 @@ class CrawlerEngine:
                 for candidate in self._javascript_candidates(response_record.url, text):
                     discovered_links += 1
                     candidate_id = self.workspace.add_asset("url", candidate, source="javascript")
-                    self.workspace.add_edge(page_id, candidate_id, "references", {"source": "javascript"})
+                    self.workspace.add_edge(
+                        page_id,
+                        candidate_id,
+                        "references",
+                        {"source": "javascript"},
+                    )
                     candidate_key = self._queue_key(candidate, self.config.allow_query_variants)
                     if candidate_key not in queued and depth < self.config.max_depth:
                         queued.add(candidate_key)

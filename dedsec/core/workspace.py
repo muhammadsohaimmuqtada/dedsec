@@ -1,8 +1,22 @@
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+
+_REDACTED = "[REDACTED]"
+_SENSITIVE_NAME_RE = re.compile(
+    r"(?:^|[_\-.])(pass(?:word|wd)?|secret|token|api[_-]?key|auth(?:orization)?|"
+    r"session(?:id)?|sid|csrf|xsrf|cookie|jwt|private[_-]?key)(?:$|[_\-.])",
+    re.I,
+)
+_BEARER_RE = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+_INLINE_SECRET_RE = re.compile(
+    r"(?i)\b(password|passwd|token|secret|api[_-]?key|session(?:id)?|sid|csrf|xsrf)"
+    r"\s*[:=]\s*([^&\s,;]+)"
+)
 
 
 def _stable_json(value: Any) -> str:
@@ -27,6 +41,20 @@ def canonical_url(url: str) -> str:
     return urlunsplit((scheme, authority, path, parsed.query, ""))
 
 
+def endpoint_key(method: str, url: str, path_template: Optional[str] = None) -> str:
+    parsed = urlsplit(canonical_url(url))
+    path = path_template or parsed.path or "/"
+    authority = parsed.netloc
+    return "%s %s://%s%s" % ((method or "GET").upper(), parsed.scheme, authority, path)
+
+
+def _request_shape_url(url: str) -> str:
+    parsed = urlsplit(canonical_url(url))
+    names = sorted(name for name, _ in parse_qsl(parsed.query, keep_blank_values=True))
+    query = urlencode([(name, "") for name in names])
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, ""))
+
+
 def _flatten_json(value: Any, prefix: str = "") -> Iterable[Tuple[str, Any]]:
     if isinstance(value, dict):
         for key in sorted(value):
@@ -40,6 +68,66 @@ def _flatten_json(value: Any, prefix: str = "") -> Iterable[Tuple[str, Any]]:
                 yield item
     else:
         yield prefix, value
+
+
+def _sensitive_name(name: str, location: Optional[str] = None) -> bool:
+    lowered = (name or "").strip().lower()
+    if (location or "").lower() == "cookie":
+        return True
+    if lowered in {
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+        "set-cookie",
+        "x-api-key",
+        "x-auth-token",
+        "x-csrf-token",
+        "x-xsrf-token",
+    }:
+        return True
+    return _SENSITIVE_NAME_RE.search(lowered.replace("[", ".").replace("]", "")) is not None
+
+
+def _scrub_string(value: str) -> str:
+    scrubbed = _BEARER_RE.sub(lambda match: "%s %s" % (match.group(1), _REDACTED), value)
+    scrubbed = _INLINE_SECRET_RE.sub(lambda match: "%s=%s" % (match.group(1), _REDACTED), scrubbed)
+    return scrubbed
+
+
+def _scrub_value(value: Any, key: Optional[str] = None) -> Any:
+    if key and _sensitive_name(key):
+        return _REDACTED
+    if isinstance(value, dict):
+        return {str(k): _scrub_value(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_scrub_value(item) for item in value]
+    if isinstance(value, str):
+        return _scrub_string(value)
+    return value
+
+
+def _safe_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    return {
+        str(name): (_REDACTED if _sensitive_name(str(name), "header") else _scrub_string(str(value)))
+        for name, value in headers.items()
+    }
+
+
+def _safe_body(body: Any, content_type: Optional[str]) -> Any:
+    if body is None:
+        return None
+    normalized = (content_type or "").split(";", 1)[0].strip().lower()
+    if isinstance(body, (dict, list, tuple)):
+        return _scrub_value(body)
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
+    if normalized == "application/x-www-form-urlencoded":
+        fields = []
+        for name, value in parse_qsl(text, keep_blank_values=True):
+            fields.append((name, _REDACTED if _sensitive_name(name, "body") else _scrub_string(value)))
+        return urlencode(fields)
+    return _scrub_string(text)
 
 
 @dataclass
@@ -82,6 +170,15 @@ class InsertionPoint:
             },
         )
 
+    def public_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        if _sensitive_name(self.name, self.location):
+            data["value"] = _REDACTED
+        else:
+            data["value"] = _scrub_value(self.value)
+        data["metadata"] = _scrub_value(self.metadata)
+        return data
+
 
 @dataclass
 class IdentityContext:
@@ -98,7 +195,9 @@ class IdentityContext:
         return cls(id="identity-anonymous")
 
     def public_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data["metadata"] = _scrub_value(self.metadata)
+        return data
 
 
 @dataclass
@@ -131,25 +230,35 @@ class RequestRecord:
     ) -> "RequestRecord":
         normalized_url = canonical_url(url)
         normalized_method = (method or "GET").upper()
-        points = list(insertion_points or infer_insertion_points(
+        inferred = infer_insertion_points(
             normalized_method,
             normalized_url,
             headers=headers,
             body=body,
             content_type=content_type,
             source=source,
-        ))
-        body_shape = body
-        if isinstance(body, (dict, list)):
-            body_shape = _stable_json(body)
+        )
+        combined: Dict[str, InsertionPoint] = {point.id: point for point in inferred}
+        for point in insertion_points or []:
+            combined[point.id] = point
+        points = [combined[key] for key in sorted(combined)]
+        point_shape = [
+            {
+                "location": point.location,
+                "name": point.name,
+                "value_type": point.value_type,
+                "required": point.required,
+            }
+            for point in points
+        ]
         request_id = stable_id(
             "req",
             {
                 "method": normalized_method,
-                "url": normalized_url,
-                "body": body_shape,
+                "url_shape": _request_shape_url(normalized_url),
                 "content_type": content_type,
                 "identity_id": identity_id,
+                "insertion_points": point_shape,
             },
         )
         return cls(
@@ -168,7 +277,10 @@ class RequestRecord:
 
     def public_dict(self) -> Dict[str, Any]:
         data = asdict(self)
-        data["insertion_points"] = [asdict(item) for item in self.insertion_points]
+        data["headers"] = _safe_headers(self.headers)
+        data["body"] = _safe_body(self.body, self.content_type)
+        data["insertion_points"] = [item.public_dict() for item in self.insertion_points]
+        data["metadata"] = _scrub_value(self.metadata)
         return data
 
 
@@ -219,6 +331,12 @@ class ResponseRecord:
             metadata=dict(metadata or {}),
         )
 
+    def public_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["headers"] = _safe_headers(self.headers)
+        data["metadata"] = _scrub_value(self.metadata)
+        return data
+
 
 @dataclass
 class Observation:
@@ -266,6 +384,11 @@ class Observation:
             evidence=dict(evidence or {}),
             source=source,
         )
+
+    def public_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["evidence"] = _scrub_value(self.evidence)
+        return data
 
 
 @dataclass
@@ -336,8 +459,10 @@ class ResearchWorkspace:
     def _normalize_asset_key(kind: str, key: str) -> str:
         if kind in {"domain", "host"}:
             return (key or "").lower().rstrip(".")
-        if kind in {"url", "endpoint"}:
+        if kind == "url":
             return canonical_url(key)
+        if kind == "endpoint":
+            return str(key).strip()
         return str(key)
 
     def add_asset(
@@ -411,10 +536,16 @@ class ResearchWorkspace:
     def add_request(self, request: RequestRecord) -> str:
         is_new = request.id not in self.requests
         self.requests[request.id] = request
+        path_template = request.metadata.get("path_template") if request.metadata else None
+        key = endpoint_key(request.method, request.url, path_template=path_template)
         endpoint_id = self.add_asset(
             "endpoint",
-            request.url,
-            attributes={"method": request.method, "content_type": request.content_type},
+            key,
+            attributes={
+                "method": request.method,
+                "content_type": request.content_type,
+                "path_template": path_template,
+            },
             source=request.source,
         )
         url_id = self.add_asset("url", request.url, source=request.source)
@@ -424,8 +555,10 @@ class ResearchWorkspace:
         return request.id
 
     def add_response(self, response: ResponseRecord) -> str:
+        is_new = response.id not in self.responses
         self.responses[response.id] = response
-        self.coverage.observe_request()
+        if is_new:
+            self.coverage.observe_request()
         return response.id
 
     def add_observation(self, observation: Observation) -> str:
@@ -473,11 +606,11 @@ class ResearchWorkspace:
             "assets": [asdict(self.assets[key]) for key in sorted(self.assets)],
             "edges": [asdict(self.edges[key]) for key in sorted(self.edges)],
             "requests": [self.requests[key].public_dict() for key in sorted(self.requests)],
-            "responses": [asdict(self.responses[key]) for key in sorted(self.responses)],
-            "observations": [asdict(self.observations[key]) for key in sorted(self.observations)],
+            "responses": [self.responses[key].public_dict() for key in sorted(self.responses)],
+            "observations": [self.observations[key].public_dict() for key in sorted(self.observations)],
             "identities": [self.identities[key].public_dict() for key in sorted(self.identities)],
             "coverage": self.coverage.snapshot(),
-            "metadata": dict(self.metadata),
+            "metadata": _scrub_value(self.metadata),
         }
 
     def diff(self, previous_snapshot: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -517,17 +650,11 @@ def infer_insertion_points(
     content_type: Optional[str] = None,
     source: str = "discovered",
 ) -> List[InsertionPoint]:
+    del method
     points: List[InsertionPoint] = []
     parsed = urlsplit(url)
     for name, value in parse_qsl(parsed.query, keep_blank_values=True):
-        points.append(
-            InsertionPoint(
-                location="query",
-                name=name,
-                value=value,
-                source=source,
-            )
-        )
+        points.append(InsertionPoint(location="query", name=name, value=value, source=source))
 
     for header_name, header_value in (headers or {}).items():
         lower = header_name.lower()
@@ -577,14 +704,7 @@ def infer_insertion_points(
     elif normalized_type == "application/x-www-form-urlencoded" and body:
         encoded = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
         for name, value in parse_qsl(encoded, keep_blank_values=True):
-            points.append(
-                InsertionPoint(
-                    location="body",
-                    name=name,
-                    value=value,
-                    source=source,
-                )
-            )
+            points.append(InsertionPoint(location="body", name=name, value=value, source=source))
 
     unique: Dict[str, InsertionPoint] = {}
     for point in points:
