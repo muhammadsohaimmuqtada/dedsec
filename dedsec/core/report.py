@@ -59,11 +59,16 @@ def build_report(
     correlation = correlated if correlated is not None else FindingsCorrelator().correlate(modules)
     workspace_snapshot = workspace.snapshot() if workspace is not None else None
     coverage = workspace_snapshot.get("coverage", {}) if workspace_snapshot else {}
+    safe_target_url = (
+        workspace_snapshot.get("target_url")
+        if workspace_snapshot is not None
+        else redact_value(url)
+    )
     report = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "scan_id": evidence_store.scan_id if evidence_store else (workspace.scan_id if workspace else None),
         "generated_at": _utc_now(),
-        "target": {"url": url, "domain": domain},
+        "target": {"url": safe_target_url, "domain": domain},
         "runtime": redact_value(runtime_metadata or {}),
         "summary": {
             **_module_summary(modules),
@@ -152,7 +157,7 @@ def generate_report(
     print(f"\n{Colors.BOLD}{Colors.CYAN}{'='*60}{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.WHITE}  DEDSEC SCAN COMPLETE{Colors.RESET}")
     print(f"{Colors.BOLD}{Colors.CYAN}{'='*60}{Colors.RESET}")
-    print(f"{Colors.GREEN}[+]{Colors.RESET} Target:    {url}")
+    print(f"{Colors.GREEN}[+]{Colors.RESET} Target:    {report_data['target']['url']}")
     print(f"{Colors.GREEN}[+]{Colors.RESET} Domain:    {domain}")
     print(f"{Colors.GREEN}[+]{Colors.RESET} Timestamp: {timestamp}")
     print(f"{Colors.GREEN}[+]{Colors.RESET} Modules:   {report_data['summary']['total']} terminal")
