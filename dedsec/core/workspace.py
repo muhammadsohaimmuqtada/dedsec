@@ -90,8 +90,35 @@ def _sensitive_name(name: str, location: Optional[str] = None) -> bool:
 
 def _scrub_string(value: str) -> str:
     scrubbed = _BEARER_RE.sub(lambda match: "%s %s" % (match.group(1), _REDACTED), value)
-    scrubbed = _INLINE_SECRET_RE.sub(lambda match: "%s=%s" % (match.group(1), _REDACTED), scrubbed)
+    scrubbed = _INLINE_SECRET_RE.sub(
+        lambda match: "%s=%s" % (match.group(1), _REDACTED),
+        scrubbed,
+    )
     return scrubbed
+
+
+def _safe_url(url: str) -> str:
+    normalized = canonical_url(url)
+    parsed = urlsplit(normalized)
+    if not parsed.scheme or not parsed.netloc:
+        return _scrub_string(normalized)
+    query = []
+    for name, value in parse_qsl(parsed.query, keep_blank_values=True):
+        query.append(
+            (
+                name,
+                _REDACTED if _sensitive_name(name, "query") else _scrub_string(value),
+            )
+        )
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            urlencode(query),
+            "",
+        )
+    )
 
 
 def _scrub_value(value: Any, key: Optional[str] = None) -> Any:
@@ -110,7 +137,11 @@ def _scrub_value(value: Any, key: Optional[str] = None) -> Any:
 
 def _safe_headers(headers: Dict[str, str]) -> Dict[str, str]:
     return {
-        str(name): (_REDACTED if _sensitive_name(str(name), "header") else _scrub_string(str(value)))
+        str(name): (
+            _REDACTED
+            if _sensitive_name(str(name), "header")
+            else _scrub_string(str(value))
+        )
         for name, value in headers.items()
     }
 
@@ -125,7 +156,14 @@ def _safe_body(body: Any, content_type: Optional[str]) -> Any:
     if normalized == "application/x-www-form-urlencoded":
         fields = []
         for name, value in parse_qsl(text, keep_blank_values=True):
-            fields.append((name, _REDACTED if _sensitive_name(name, "body") else _scrub_string(value)))
+            fields.append(
+                (
+                    name,
+                    _REDACTED
+                    if _sensitive_name(name, "body")
+                    else _scrub_string(value),
+                )
+            )
         return urlencode(fields)
     return _scrub_string(text)
 
@@ -138,6 +176,15 @@ class AssetNode:
     attributes: Dict[str, Any] = field(default_factory=dict)
     sources: List[str] = field(default_factory=list)
 
+    def public_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        if self.kind == "url":
+            data["key"] = _safe_url(self.key)
+        else:
+            data["key"] = _scrub_string(self.key)
+        data["attributes"] = _scrub_value(self.attributes)
+        return data
+
 
 @dataclass
 class AssetEdge:
@@ -146,6 +193,11 @@ class AssetEdge:
     target_id: str
     relation: str
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def public_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["metadata"] = _scrub_value(self.metadata)
+        return data
 
 
 @dataclass
@@ -277,6 +329,7 @@ class RequestRecord:
 
     def public_dict(self) -> Dict[str, Any]:
         data = asdict(self)
+        data["url"] = _safe_url(self.url)
         data["headers"] = _safe_headers(self.headers)
         data["body"] = _safe_body(self.body, self.content_type)
         data["insertion_points"] = [item.public_dict() for item in self.insertion_points]
@@ -313,7 +366,11 @@ class ResponseRecord:
         raw = body or b""
         response_id = stable_id(
             "resp",
-            {"request_id": request_id, "url": canonical_url(url), "status": int(status_code)},
+            {
+                "request_id": request_id,
+                "url": _safe_url(url),
+                "status": int(status_code),
+            },
         )
         normalized_headers = {str(k): str(v) for k, v in (headers or {}).items()}
         content_type = normalized_headers.get("Content-Type") or normalized_headers.get("content-type")
@@ -333,6 +390,7 @@ class ResponseRecord:
 
     def public_dict(self) -> Dict[str, Any]:
         data = asdict(self)
+        data["url"] = _safe_url(self.url)
         data["headers"] = _safe_headers(self.headers)
         data["metadata"] = _scrub_value(self.metadata)
         return data
@@ -460,7 +518,7 @@ class ResearchWorkspace:
         if kind in {"domain", "host"}:
             return (key or "").lower().rstrip(".")
         if kind == "url":
-            return canonical_url(key)
+            return _safe_url(key)
         if kind == "endpoint":
             return str(key).strip()
         return str(key)
@@ -601,13 +659,15 @@ class ResearchWorkspace:
     def snapshot(self) -> Dict[str, Any]:
         return {
             "scan_id": self.scan_id,
-            "target_url": self.target_url,
+            "target_url": _safe_url(self.target_url),
             "domain": self.domain,
-            "assets": [asdict(self.assets[key]) for key in sorted(self.assets)],
-            "edges": [asdict(self.edges[key]) for key in sorted(self.edges)],
+            "assets": [self.assets[key].public_dict() for key in sorted(self.assets)],
+            "edges": [self.edges[key].public_dict() for key in sorted(self.edges)],
             "requests": [self.requests[key].public_dict() for key in sorted(self.requests)],
             "responses": [self.responses[key].public_dict() for key in sorted(self.responses)],
-            "observations": [self.observations[key].public_dict() for key in sorted(self.observations)],
+            "observations": [
+                self.observations[key].public_dict() for key in sorted(self.observations)
+            ],
             "identities": [self.identities[key].public_dict() for key in sorted(self.identities)],
             "coverage": self.coverage.snapshot(),
             "metadata": _scrub_value(self.metadata),
