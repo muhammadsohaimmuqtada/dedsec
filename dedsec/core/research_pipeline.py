@@ -13,7 +13,7 @@ from dedsec.core.network_paths import probe_target_paths
 from dedsec.core.project_store import ProjectStore
 from dedsec.core.scan_plan import ScanPlan
 from dedsec.core.templates import TemplateRepository, TemplateRunner
-from dedsec.core.workspace import Observation, ResearchWorkspace
+from dedsec.core.workspace import Observation, ResearchWorkspace, stable_id
 
 
 def _utc_now() -> str:
@@ -360,6 +360,60 @@ class ResearchPipeline:
                 self.workspace.add_observation(observation)
 
         self.workspace.metadata["pipeline"] = dict(self.metadata)
+
+    def ingest_correlation(self, correlated: Dict[str, Any]) -> None:
+        """Persist stable correlation states for meaningful cross-scan diff.
+
+        Evidence IDs are intentionally excluded from the stable identity because
+        they are scan-specific. A candidate becoming verified therefore appears
+        as a changed observation rather than an unrelated new object.
+        """
+        groups = (
+            ("verified_findings", "verified-finding"),
+            ("hypotheses", "candidate"),
+            ("rejected_or_unverified", "rejected-or-unverified"),
+        )
+        for collection, classification in groups:
+            for item in correlated.get(collection, []) or []:
+                if not isinstance(item, dict):
+                    continue
+                title = str(
+                    item.get("title")
+                    or item.get("name")
+                    or item.get("type")
+                    or item.get("source")
+                    or collection
+                )
+                stable_key = {
+                    "source": item.get("source"),
+                    "module": item.get("module"),
+                    "type": item.get("type") or item.get("category"),
+                    "title": title,
+                    "url": item.get("url") or item.get("target"),
+                    "parameter": item.get("parameter") or item.get("param"),
+                }
+                observation_id = stable_id("corr", stable_key)
+                evidence = {
+                    key: value
+                    for key, value in item.items()
+                    if key not in {"id", "evidence_ids"}
+                }
+                evidence_ids = item.get("evidence_ids") or []
+                if isinstance(evidence_ids, list):
+                    evidence["evidence_reference_count"] = len(evidence_ids)
+                observation = Observation(
+                    id=observation_id,
+                    category="finding-correlation",
+                    title=title,
+                    classification=classification,
+                    severity=str(item.get("severity") or "INFO").upper(),
+                    confidence=str(item.get("confidence") or classification),
+                    asset_id=None,
+                    request_id=None,
+                    evidence=evidence,
+                    source="correlator",
+                )
+                self.workspace.add_observation(observation)
 
     def compute_project_diff(self) -> Optional[Dict[str, Any]]:
         if self.project_store is None:
