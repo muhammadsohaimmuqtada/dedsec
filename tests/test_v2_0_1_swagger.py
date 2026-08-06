@@ -32,6 +32,7 @@ class V201SwaggerTests(unittest.TestCase):
         request = next(iter(workspace.requests.values()))
         self.assertEqual(result["requests_imported"], 1)
         self.assertEqual(request.method, "POST")
+        self.assertEqual(request.url, "https://example.com/api/login")
         self.assertEqual(request.content_type, "application/x-www-form-urlencoded")
         self.assertEqual(request.body["username"], "sample")
         points = {(point.location, point.name) for point in request.insertion_points}
