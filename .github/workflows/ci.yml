@@ -43,7 +43,18 @@ jobs:
           pip install -e .
           pip check
       - name: Unit and regression tests
-        run: python -m unittest discover -s tests -v
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -v 2>&1 | tee "test-output-${{ matrix.python-version }}.txt"
+      - name: Upload regression test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unittest-${{ matrix.python-version }}
+          path: test-output-${{ matrix.python-version }}.txt
+          if-no-files-found: error
+          retention-days: 2
       - name: CLI smoke test
         run: |
           dedsec --version
