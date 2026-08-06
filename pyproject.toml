@@ -38,7 +38,10 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/muhammadsohaimmuqtada/dedsec"
 Repository = "https://github.com/muhammadsohaimmuqtada/dedsec"
+Documentation = "https://github.com/muhammadsohaimmuqtada/dedsec/tree/main/docs"
 Issues = "https://github.com/muhammadsohaimmuqtada/dedsec/issues"
+Security = "https://github.com/muhammadsohaimmuqtada/dedsec/blob/main/SECURITY.md"
+Contributing = "https://github.com/muhammadsohaimmuqtada/dedsec/blob/main/CONTRIBUTING.md"
 
 [project.scripts]
 dedsec = "dedsec.cli:main"
