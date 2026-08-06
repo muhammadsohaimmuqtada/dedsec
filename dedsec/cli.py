@@ -10,9 +10,9 @@ from dedsec import __version__
 from dedsec.core.banner import print_banner
 from dedsec.core.contracts import ScanConfig
 from dedsec.core.correlator import FindingsCorrelator
-from dedsec.core.evidence import EvidenceStore
 from dedsec.core.orchestrator import PerThreadCapture, run_modules
 from dedsec.core.report import generate_report
+from dedsec.core.runtime import ScanContext
 from dedsec.core.utils import configure_http_session, error, normalize_target
 
 MODULE_MAP = {
@@ -87,7 +87,7 @@ def _version_callback(value: bool):
 
 
 def scan(
-    url: str = typer.Argument(..., help="Target URL (e.g., https://example.com)"),
+    url: str = typer.Argument("", help="Target URL (e.g., https://example.com)"),
     modules: str = typer.Option(
         "all", "--modules", "-m", help="Modules to run (comma-separated or legacy space-separated)"
     ),
@@ -116,6 +116,17 @@ def scan(
     ),
     backoff: float = typer.Option(
         0.5, "--backoff", min=0.0, help="HTTP/module retry backoff factor"
+    ),
+    max_requests: int = typer.Option(
+        1000,
+        "--max-requests",
+        min=1,
+        help="Shared request budget for runtime-aware modules",
+    ),
+    root_only: bool = typer.Option(
+        False,
+        "--root-only",
+        help="Restrict runtime-aware target traffic to the root host",
     ),
     output: Optional[str] = typer.Option(None, "--output", help="Save v2 report to file (JSON)"),
     evidence_dir: Optional[str] = typer.Option(
@@ -177,7 +188,15 @@ def scan(
         module_retries=module_retries,
         evidence_dir=evidence_dir,
     )
-    evidence_store = EvidenceStore(artifact_dir=evidence_dir)
+    scan_context = ScanContext.build(
+        target_url=normalized_url,
+        domain=domain,
+        timeout=timeout,
+        evidence_dir=evidence_dir,
+        max_requests=max_requests,
+        include_subdomains=not root_only,
+    )
+    evidence_store = scan_context.evidence
 
     info_table = Table(show_header=False, title="Scan Configuration")
     info_table.add_column("key", style="cyan", no_wrap=True)
@@ -189,6 +208,8 @@ def scan(
     info_table.add_row("Concurrency", str(min(config.concurrency, len(selected))))
     info_table.add_row("Module retries", str(module_retries))
     info_table.add_row("Scan ID", evidence_store.scan_id)
+    info_table.add_row("Runtime scope", "root host only" if root_only else "root + subdomains")
+    info_table.add_row("Runtime request budget", str(max_requests))
     if module_timeout:
         info_table.add_row("Module timeout", f"{module_timeout}s")
     if global_timeout:
@@ -213,6 +234,7 @@ def scan(
             config=config,
             on_update=_on_update,
             evidence_store=evidence_store,
+            scan_context=scan_context,
         )
     finally:
         sys.stdout = capture._real
@@ -242,19 +264,25 @@ def scan(
     console.print(summary)
 
     correlated = FindingsCorrelator().correlate(module_results)
-    generate_report(
-        normalized_url,
-        domain,
-        results,
-        json_output=json_output,
-        output_file=output,
-        module_results=module_results,
-        evidence_store=evidence_store,
-        correlated=correlated,
-    )
+    try:
+        generate_report(
+            normalized_url,
+            domain,
+            results,
+            json_output=json_output,
+            output_file=output,
+            module_results=module_results,
+            evidence_store=evidence_store,
+            correlated=correlated,
+        )
+    finally:
+        scan_context.close()
 
 
 def main():
+    if "--version" in sys.argv[1:] and all(arg.startswith("-") for arg in sys.argv[1:]):
+        typer.echo(f"DEDSEC v{__version__}")
+        return
     typer.run(scan)
 
 

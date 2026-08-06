@@ -1,12 +1,15 @@
+import sys
+import types
 import unittest
 from unittest.mock import Mock, patch
 
 import requests
 
+from dedsec.core.contracts import ScanConfig
 from dedsec.core.findings import VerifiedFinding
+from dedsec.core.orchestrator import run_modules
 from dedsec.core.runtime import ScanContext
 from dedsec.core.scope import ScopePolicy
-from dedsec.core.transport import TransportEngine
 
 
 class ScopePolicyTests(unittest.TestCase):
@@ -51,37 +54,48 @@ class TransportTests(unittest.TestCase):
             max_requests=max_requests,
         )
 
+    def test_context_reuses_one_transport(self):
+        context = self._context()
+        first = context.get_transport(retries=0)
+        second = context.get_transport(retries=0)
+        self.assertIs(first, second)
+        context.close()
+
     def test_scope_rejection_does_not_consume_budget(self):
         context = self._context()
-        engine = TransportEngine(context, retries=0)
+        engine = context.get_transport(retries=0)
         outcome = engine.request("GET", "https://outside.test/")
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.failure.category, "scope")
         self.assertEqual(context.request_budget.requests_used, 0)
+        context.close()
 
     def test_budget_is_enforced(self):
         context = self._context(max_requests=0)
-        engine = TransportEngine(context, retries=0)
+        engine = context.get_transport(retries=0)
         outcome = engine.request("GET", "https://example.com/")
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.failure.category, "budget")
+        context.close()
 
     @patch("requests.Session.request")
     def test_tls_failures_are_classified_without_insecure_fallback(self, request_mock):
         request_mock.side_effect = requests.exceptions.SSLError("certificate verify failed")
-        engine = TransportEngine(self._context(), retries=0)
+        context = self._context()
+        engine = context.get_transport(retries=0)
         outcome = engine.request("GET", "https://example.com/")
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.failure.category, "tls")
         self.assertEqual(request_mock.call_count, 1)
         self.assertTrue(request_mock.call_args.kwargs["verify"])
+        context.close()
 
     @patch("requests.Session.request")
     def test_cache_avoids_duplicate_request(self, request_mock):
         response = Mock(spec=requests.Response)
         request_mock.return_value = response
         context = self._context()
-        engine = TransportEngine(context, retries=0)
+        engine = context.get_transport(retries=0)
         first = engine.request("GET", "https://example.com/")
         second = engine.request("GET", "https://example.com/")
         self.assertTrue(first.ok)
@@ -89,6 +103,36 @@ class TransportTests(unittest.TestCase):
         self.assertTrue(second.from_cache)
         self.assertEqual(request_mock.call_count, 1)
         self.assertEqual(context.request_budget.requests_used, 1)
+        context.close()
+
+
+class RuntimeModuleCompatibilityTests(unittest.TestCase):
+    def test_orchestrator_prefers_runtime_entrypoint(self):
+        name = "tests.fake_runtime_module"
+        module = types.ModuleType(name)
+
+        def run_with_context(context):
+            return {"entrypoint": "runtime", "scan_id": context.scan_id}
+
+        def run(url, domain, timeout):
+            raise AssertionError("legacy entrypoint should not be called")
+
+        module.run_with_context = run_with_context
+        module.run = run
+        context = ScanContext.build("https://example.com", "example.com")
+        with patch.dict(sys.modules, {name: module}):
+            results, module_results = run_modules(
+                ["fake"],
+                {"fake": (name, "Fake")},
+                context.target_url,
+                context.domain,
+                ScanConfig(concurrency=1, module_retries=0),
+                scan_context=context,
+            )
+        self.assertEqual(results["fake"]["entrypoint"], "runtime")
+        self.assertEqual(module_results[0].status, "success")
+        self.assertEqual(len(module_results[0].evidence_ids), 1)
+        context.close()
 
 
 if __name__ == "__main__":

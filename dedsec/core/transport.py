@@ -2,13 +2,14 @@ import hashlib
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
-from dedsec.core.runtime import ScanContext
+if TYPE_CHECKING:
+    from dedsec.core.runtime import ScanContext
 
 
 @dataclass(frozen=True)
@@ -31,11 +32,11 @@ class RequestOutcome:
 
 
 class TransportEngine:
-    """Central HTTP transport with scope checks, bounded retries, caching, and request budgets."""
+    """Shared HTTP transport for runtime-aware target requests."""
 
     def __init__(
         self,
-        context: ScanContext,
+        context: "ScanContext",
         retries: int = 2,
         backoff: float = 0.4,
         verify_tls: bool = True,

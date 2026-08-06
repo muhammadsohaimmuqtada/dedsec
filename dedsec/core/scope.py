@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
-from typing import Iterable, List, Optional, Set
+from typing import Iterable, Optional, Set
 from urllib.parse import urlparse
 
 
@@ -12,7 +12,7 @@ class ScopeDecision:
 
 @dataclass
 class ScopePolicy:
-    """Fail-closed target scope policy used by the v2 runtime."""
+    """Fail-closed target scope policy for active runtime requests."""
 
     root_domain: str
     allowed_hosts: Set[str] = field(default_factory=set)
@@ -26,8 +26,12 @@ class ScopePolicy:
         if not root:
             raise ValueError("Scope root_domain must be a valid host")
         self.root_domain = root
-        self.allowed_hosts = {self._normalize_host(host) for host in self.allowed_hosts if host}
-        self.denied_hosts = {self._normalize_host(host) for host in self.denied_hosts if host}
+        self.allowed_hosts = {
+            self._normalize_host(host) for host in self.allowed_hosts if self._normalize_host(host)
+        }
+        self.denied_hosts = {
+            self._normalize_host(host) for host in self.denied_hosts if self._normalize_host(host)
+        }
         if self.allowed_ports is not None:
             self.allowed_ports = {int(port) for port in self.allowed_ports}
 
@@ -35,12 +39,13 @@ class ScopePolicy:
     def _normalize_host(host: str) -> str:
         return (host or "").strip().rstrip(".").lower()
 
-    def _host_matches(self, host: str, pattern: str) -> bool:
+    @staticmethod
+    def _host_matches(host: str, pattern: str) -> bool:
         if "*" in pattern:
             return fnmatch(host, pattern)
         return host == pattern
 
-    def _is_host_allowed(self, host: str) -> ScopeDecision:
+    def _check_host(self, host: str) -> ScopeDecision:
         normalized = self._normalize_host(host)
         if not normalized:
             return ScopeDecision(False, "missing host")
@@ -61,22 +66,21 @@ class ScopePolicy:
 
     def check_url(self, url: str) -> ScopeDecision:
         parsed = urlparse(url)
-        if parsed.scheme.lower() not in self.allowed_schemes:
+        scheme = parsed.scheme.lower()
+        if scheme not in self.allowed_schemes:
             return ScopeDecision(False, "scheme outside scope")
 
-        host_decision = self._is_host_allowed(parsed.hostname or "")
+        host_decision = self._check_host(parsed.hostname or "")
         if not host_decision.allowed:
             return host_decision
 
-        port = parsed.port
-        if port is None:
-            port = 443 if parsed.scheme.lower() == "https" else 80
+        port = parsed.port or (443 if scheme == "https" else 80)
         if self.allowed_ports is not None and port not in self.allowed_ports:
             return ScopeDecision(False, "port outside scope")
         return ScopeDecision(True, host_decision.reason)
 
     def check_host(self, host: str, port: Optional[int] = None) -> ScopeDecision:
-        decision = self._is_host_allowed(host)
+        decision = self._check_host(host)
         if not decision.allowed:
             return decision
         if port is not None and self.allowed_ports is not None and port not in self.allowed_ports:
