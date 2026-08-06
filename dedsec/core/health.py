@@ -68,13 +68,6 @@ class TargetHealth:
     def _get(container, fallback):
         return container.value if container is not None else fallback
 
-    @staticmethod
-    def _set(container, value):
-        if container is not None:
-            container.value = value
-            return value
-        return value
-
     @property
     def state_code(self) -> int:
         with self._lock:
@@ -150,15 +143,18 @@ class TargetHealth:
                 last_failure_at=time.monotonic(),
             )
 
+    def _circuit_open_from_values(self, state: int, last_failure_at: float) -> bool:
+        if state != self.UNREACHABLE:
+            return False
+        if self.cooldown_seconds <= 0:
+            return True
+        return (time.monotonic() - last_failure_at) < self.cooldown_seconds
+
     def should_short_circuit(self) -> bool:
         with self._lock:
             state = int(self._get(self._shared_state, self._state))
-            if state != self.UNREACHABLE:
-                return False
             last_failure_at = float(self._get(self._shared_last_failure_at, self._last_failure_at))
-            if self.cooldown_seconds <= 0:
-                return True
-            return (time.monotonic() - last_failure_at) < self.cooldown_seconds
+            return self._circuit_open_from_values(state, last_failure_at)
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -166,13 +162,14 @@ class TargetHealth:
             failures = int(self._get(self._shared_failures, self._failures))
             successes = int(self._get(self._shared_successes, self._successes))
             failure_code = int(self._get(self._shared_last_failure, self._last_failure))
+            last_failure_at = float(self._get(self._shared_last_failure_at, self._last_failure_at))
             return {
                 "state": self._STATE_NAMES.get(state, "unknown"),
                 "state_code": state,
                 "consecutive_failures": failures,
                 "successes": successes,
                 "last_failure_category": self._FAILURE_NAMES.get(failure_code, ""),
-                "circuit_open": self.should_short_circuit(),
+                "circuit_open": self._circuit_open_from_values(state, last_failure_at),
                 "failure_threshold": self.failure_threshold,
                 "cooldown_seconds": self.cooldown_seconds,
             }
