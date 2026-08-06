@@ -2,7 +2,6 @@ import importlib
 import io
 import multiprocessing
 import queue
-import sys
 import threading
 import time
 from contextlib import contextmanager, redirect_stdout
@@ -230,7 +229,9 @@ def _process_module_entry(
                         break
                     if isinstance(raw_data, dict) and raw_data.get("partial"):
                         status = "partial"
-                        error_message = str(raw_data.get("error") or "Module completed with partial data")
+                        error_message = str(
+                            raw_data.get("error") or "Module completed with partial data"
+                        )
                         failure_class = str(raw_data.get("failure_class") or "partial")
                         break
                     if isinstance(raw_data, dict) and raw_data.get("error"):
@@ -399,7 +400,10 @@ def run_modules(
                 label=label,
                 status="inconclusive",
                 duration=0.0,
-                error="Root target transport is currently unreachable; HTTP-dependent module skipped",
+                error=(
+                    "Root target transport is currently unreachable; "
+                    "HTTP-dependent module skipped"
+                ),
                 attempts=0,
                 started_at=None,
                 failure_class="target_unreachable",
@@ -588,7 +592,12 @@ def run_modules(
             for module_key in list(active):
                 state = active.get(module_key)
                 if state is not None:
-                    _finish_terminal(module_key, state, "aborted", "Scanner cleanup aborted module")
+                    _finish_terminal(
+                        module_key,
+                        state,
+                        "aborted",
+                        "Scanner cleanup aborted module",
+                    )
 
     if shared_counter is not None and scan_context is not None:
         scan_context.request_budget.set_used(int(shared_counter.value))
