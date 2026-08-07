@@ -58,6 +58,11 @@ browser = [
   "playwright>=1.48,<2",
 ]
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["dedsec*"]
+exclude = ["tests*", "testing*", "examples*"]
+
 [tool.black]
 line-length = 100
 target-version = ["py38"]
