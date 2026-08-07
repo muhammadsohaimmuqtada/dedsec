@@ -19,6 +19,8 @@ jobs:
       - name: Install development dependencies
         run: |
           python -m pip install --upgrade pip
+          mkdir -p testing/live-artifacts
+          printf '{}\n' > testing/live-artifacts/report.json
           pip install -e '.[dev]'
       - name: Ruff
         run: ruff check .
@@ -37,9 +39,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - name: Install package
+      - name: Install package with research-artifact directory present
         run: |
           python -m pip install --upgrade pip
+          mkdir -p testing/live-artifacts
+          printf '{}\n' > testing/live-artifacts/report.json
           pip install -e .
           pip check
       - name: Unit and regression tests
