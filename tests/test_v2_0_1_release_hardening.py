@@ -95,6 +95,25 @@ class ReleaseHardeningTests(unittest.TestCase):
             crawler._request_policy("https://example.com/api/read", "GET")
         )
 
+    def test_browser_auth_bundle_is_exact_origin_material(self):
+        origin_headers, cookie = BrowserCrawler._split_auth_headers(
+            {
+                "Authorization": "Bearer secret",
+                "X-API-Key": "secret-key",
+                "X-Tenant-ID": "tenant-1",
+                "Cookie": "sid=private",
+            }
+        )
+        self.assertEqual(
+            origin_headers,
+            {
+                "Authorization": "Bearer secret",
+                "X-API-Key": "secret-key",
+                "X-Tenant-ID": "tenant-1",
+            },
+        )
+        self.assertEqual(cookie, "sid=private")
+
 
 if __name__ == "__main__":
     unittest.main()
