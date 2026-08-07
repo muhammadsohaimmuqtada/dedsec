@@ -24,9 +24,9 @@ class BrowserCrawler:
 
     Browser traffic is scope-filtered before it leaves the browser. Requests
     using non-idempotent methods are recorded as discovered surfaces but are
-    aborted by default. Authentication headers are injected only for the exact
-    configured target origin, and request cookies are installed as host-scoped
-    browser cookies rather than global extra headers.
+    aborted by default. Researcher-supplied authentication material is bound
+    to the exact configured target origin, and request cookies are installed
+    as host-scoped browser cookies rather than global extra headers.
     """
 
     SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -99,7 +99,7 @@ class BrowserCrawler:
             headers={},
             body=None,
             content_type=content_type,
-            identity_id=str(getattr(self.context, "identity_id", "identity-anonymous")),
+            identity_id=str(getattr(self.context, "identity_id", None) or "identity-anonymous"),
             source="browser",
             tags=tags,
             metadata={
@@ -112,20 +112,17 @@ class BrowserCrawler:
 
     @classmethod
     def _split_auth_headers(cls, headers: Optional[Dict[str, str]]):
-        ordinary: Dict[str, str] = {}
+        """Treat the supplied header bundle as origin-bound authentication context."""
         origin_only: Dict[str, str] = {}
         cookie_header = ""
         for raw_name, raw_value in dict(headers or {}).items():
             name = str(raw_name)
             value = str(raw_value)
-            lowered = name.lower()
-            if lowered == "cookie":
+            if name.lower() == "cookie":
                 cookie_header = value
-            elif lowered in {"authorization", "proxy-authorization"}:
-                origin_only[name] = value
             else:
-                ordinary[name] = value
-        return ordinary, origin_only, cookie_header
+                origin_only[name] = value
+        return origin_only, cookie_header
 
     def crawl(self, start_url: str, headers: Optional[Dict[str, str]] = None) -> Dict[str, object]:
         try:
@@ -140,7 +137,8 @@ class BrowserCrawler:
         if not self.context.scope.check_url(start).allowed:
             raise ValueError("Browser start URL is outside configured scope")
         target_endpoint = self._endpoint(start)
-        ordinary_headers, origin_headers, cookie_header = self._split_auth_headers(headers)
+        origin_headers, cookie_header = self._split_auth_headers(headers)
+        origin_header_names = {str(name).lower() for name in origin_headers}
 
         queue: Deque[Tuple[str, int]] = deque([(start, 0)])
         queued: Set[str] = {start}
@@ -162,7 +160,7 @@ class BrowserCrawler:
 
                 browser_context = None
                 try:
-                    browser_context = browser.new_context(extra_http_headers=ordinary_headers)
+                    browser_context = browser.new_context()
                     if cookie_header:
                         entries = self._cookie_entries(cookie_header, start)
                         if entries:
@@ -191,7 +189,8 @@ class BrowserCrawler:
                             forwarded.update(origin_headers)
                         else:
                             for header_name in list(forwarded):
-                                if str(header_name).lower() in self.SENSITIVE_HEADERS:
+                                lowered = str(header_name).lower()
+                                if lowered in self.SENSITIVE_HEADERS or lowered in origin_header_names:
                                     forwarded.pop(header_name, None)
                         route.continue_(headers=forwarded)
 
