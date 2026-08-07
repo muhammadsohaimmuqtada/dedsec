@@ -99,7 +99,7 @@ class ScopePolicy:
         if self.allowed_hosts:
             if any(self._host_matches(normalized, item) for item in self.allowed_hosts):
                 return ScopeDecision(True, "host explicitly allowed")
-            return ScopeDecision(False, "host not present in allow-list")
+            return ScopeDecision(False, "host not in allowed scope (not present in allow-list)")
         if normalized == self.root_domain:
             return ScopeDecision(True, "root domain")
         if self.include_subdomains and normalized.endswith("." + self.root_domain):
@@ -129,7 +129,7 @@ class ScopePolicy:
             if port < 1 or port > 65535:
                 return ScopeDecision(False, "invalid port")
             if self.allowed_ports is not None and port not in self.allowed_ports:
-                return ScopeDecision(False, "port outside scope")
+                return ScopeDecision(False, "Port %d is not in allowed scope" % port)
             path_decision = self._check_path(parsed.path or "/")
             if not path_decision.allowed:
                 return path_decision
@@ -146,7 +146,7 @@ class ScopePolicy:
             if normalized_port < 1 or normalized_port > 65535:
                 return ScopeDecision(False, "invalid port")
             if self.allowed_ports is not None and normalized_port not in self.allowed_ports:
-                return ScopeDecision(False, "port outside scope")
+                return ScopeDecision(False, "Port %d is not in allowed scope" % normalized_port)
         return decision
 
     @classmethod
