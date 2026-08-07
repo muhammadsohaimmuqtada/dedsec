@@ -1,7 +1,7 @@
 import json
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
 try:
     import yaml
@@ -47,6 +47,34 @@ def _list(value: Any) -> List[Any]:
     if isinstance(value, list):
         return value
     return [value]
+
+
+def _reject_unknown(mapping: Any, allowed: set, label: str) -> None:
+    if not isinstance(mapping, dict):
+        raise ValueError("%s must be an object" % label)
+    unknown = sorted(str(key) for key in mapping if str(key) not in allowed)
+    if unknown:
+        raise ValueError("Unknown %s key(s): %s" % (label, ", ".join(unknown)))
+
+
+def _resolve_path(base_dir: str, value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = os.path.expanduser(str(value))
+    if not os.path.isabs(text):
+        text = os.path.join(base_dir, text)
+    return os.path.abspath(text)
+
+
+def _unique_strings(values: Any) -> List[str]:
+    result = []
+    seen = set()
+    for item in _list(values):
+        text = str(item).strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
 
 
 @dataclass
@@ -119,18 +147,90 @@ class ScanPlan:
 
     @classmethod
     def load(cls, path: str) -> "ScanPlan":
-        raw = _load(path)
+        expanded_path = os.path.abspath(os.path.expanduser(path))
+        base_dir = os.path.dirname(expanded_path)
+        raw = _load(expanded_path)
+        _reject_unknown(
+            raw,
+            {
+                "target",
+                "modules",
+                "scope",
+                "discovery",
+                "traffic",
+                "project",
+                "templates",
+                "exports",
+                "auth_file",
+                "auth",
+                "metadata",
+            },
+            "scan-plan",
+        )
         scope = raw.get("scope") or {}
         discovery = raw.get("discovery") or {}
         traffic = raw.get("traffic") or {}
         project = raw.get("project") or {}
         templates = raw.get("templates") or {}
         exports = raw.get("exports") or {}
+        auth = raw.get("auth") or {}
+
+        _reject_unknown(
+            scope,
+            {
+                "allowed_hosts",
+                "denied_hosts",
+                "allowed_ports",
+                "include_subdomains",
+                "include_paths",
+                "exclude_paths",
+            },
+            "scope",
+        )
+        _reject_unknown(
+            discovery,
+            {
+                "enabled",
+                "crawl_depth",
+                "crawl_pages",
+                "crawl_body_bytes",
+                "javascript_candidates",
+                "browser",
+                "api_specs",
+            },
+            "discovery",
+        )
+        _reject_unknown(
+            traffic,
+            {
+                "timeout",
+                "concurrency",
+                "module_timeout",
+                "global_timeout",
+                "retries",
+                "module_retries",
+                "backoff",
+                "max_requests",
+                "maximum_impact",
+            },
+            "traffic",
+        )
+        _reject_unknown(project, {"database", "resume", "diff"}, "project")
+        _reject_unknown(
+            templates,
+            {"directories", "maximum_impact", "max_templates"},
+            "templates",
+        )
+        _reject_unknown(exports, {"formats", "directory"}, "exports")
+        _reject_unknown(auth, {"file"}, "auth")
 
         allowed_ports_raw = scope.get("allowed_ports")
         allowed_ports = None
         if allowed_ports_raw is not None:
             allowed_ports = [int(item) for item in _list(allowed_ports_raw)]
+            if any(port < 1 or port > 65535 for port in allowed_ports):
+                raise ValueError("scope.allowed_ports values must be between 1 and 65535")
+            allowed_ports = sorted(set(allowed_ports))
 
         maximum_impact = str(traffic.get("maximum_impact") or "active-safe").lower()
         if maximum_impact not in IMPACT_LEVELS:
@@ -139,25 +239,38 @@ class ScanPlan:
         if template_maximum not in IMPACT_LEVELS:
             raise ValueError("Unknown templates.maximum_impact: %s" % template_maximum)
 
+        api_specs = [
+            _resolve_path(base_dir, item)
+            for item in _unique_strings(discovery.get("api_specs"))
+        ]
+        template_directories = [
+            _resolve_path(base_dir, item)
+            for item in _unique_strings(templates.get("directories"))
+        ]
+        auth_value = raw.get("auth_file") or auth.get("file")
+
         plan = cls(
-            target=raw.get("target"),
-            modules=[str(item) for item in _list(raw.get("modules"))],
+            target=str(raw.get("target")) if raw.get("target") is not None else None,
+            modules=_unique_strings(raw.get("modules")),
             scope=ScopePlan(
-                allowed_hosts=[str(item) for item in _list(scope.get("allowed_hosts"))],
-                denied_hosts=[str(item) for item in _list(scope.get("denied_hosts"))],
+                allowed_hosts=_unique_strings(scope.get("allowed_hosts")),
+                denied_hosts=_unique_strings(scope.get("denied_hosts")),
                 allowed_ports=allowed_ports,
                 include_subdomains=bool(scope.get("include_subdomains", True)),
-                include_paths=[str(item) for item in _list(scope.get("include_paths"))],
-                exclude_paths=[str(item) for item in _list(scope.get("exclude_paths"))],
+                include_paths=_unique_strings(scope.get("include_paths")),
+                exclude_paths=_unique_strings(scope.get("exclude_paths")),
             ),
             discovery=DiscoveryPlan(
                 enabled=bool(discovery.get("enabled", False)),
                 crawl_depth=max(0, int(discovery.get("crawl_depth", 3))),
                 crawl_pages=max(1, int(discovery.get("crawl_pages", 200))),
-                crawl_body_bytes=max(4096, int(discovery.get("crawl_body_bytes", 2 * 1024 * 1024))),
+                crawl_body_bytes=max(
+                    4096,
+                    int(discovery.get("crawl_body_bytes", 2 * 1024 * 1024)),
+                ),
                 javascript_candidates=bool(discovery.get("javascript_candidates", True)),
                 browser=bool(discovery.get("browser", False)),
-                api_specs=[str(item) for item in _list(discovery.get("api_specs"))],
+                api_specs=[str(item) for item in api_specs if item],
             ),
             traffic=TrafficPlan(
                 timeout=max(1, int(traffic.get("timeout", 10))),
@@ -171,22 +284,22 @@ class ScanPlan:
                 maximum_impact=maximum_impact,
             ),
             project=ProjectPlan(
-                database=project.get("database"),
+                database=_resolve_path(base_dir, project.get("database")),
                 resume=bool(project.get("resume", False)),
                 diff=bool(project.get("diff", True)),
             ),
             templates=TemplatePlan(
-                directories=[str(item) for item in _list(templates.get("directories"))],
+                directories=[str(item) for item in template_directories if item],
                 maximum_impact=template_maximum,
                 max_templates=max(1, int(templates.get("max_templates", 500))),
             ),
             exports=ExportPlan(
                 formats=[str(item).lower() for item in _list(exports.get("formats") or ["json"])],
-                directory=exports.get("directory"),
+                directory=_resolve_path(base_dir, exports.get("directory")),
             ),
-            auth_file=raw.get("auth_file") or (raw.get("auth") or {}).get("file"),
+            auth_file=_resolve_path(base_dir, auth_value),
             metadata=dict(raw.get("metadata") or {}),
-            source_path=os.path.abspath(os.path.expanduser(path)),
+            source_path=expanded_path,
         )
         plan.validate()
         return plan
@@ -204,6 +317,8 @@ class ScanPlan:
             raise ValueError(
                 "Template impact policy cannot exceed the scan traffic maximum impact"
             )
+        if self.project.resume and not self.project.database:
+            raise ValueError("project.resume=true requires project.database")
 
     def public_dict(self) -> Dict[str, Any]:
         return {
