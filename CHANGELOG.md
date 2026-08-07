@@ -2,6 +2,21 @@
 
 All notable DEDSEC changes are documented here. The project is pre-1.0-semver-strict in maturity despite the 2.0 architecture label; compatibility is maintained where practical and breaking report-schema changes are explicitly versioned.
 
+## 2.0.3 — Denominator-aware audit coverage
+
+### Coverage precision
+
+- Request-audit coverage now uses the number of audit-eligible requests as its denominator instead of every discovered request.
+- Insertion-point audit coverage likewise uses audit-eligible insertion points rather than unsupported or intentionally non-applicable points.
+- Requests with no insertion points and insertion points unsupported by the bounded active audit are classified as not applicable rather than silently depressing coverage.
+- Coverage snapshots now expose explicit audit-eligible and not-applicable counters plus denominator names.
+
+### Limit accounting
+
+- Requests omitted by the configured audit request limit are recorded as skipped with an `audit-request-limit` reason.
+- Eligible insertion points omitted by the insertion-point limit are recorded as skipped with an `audit-insertion-point-limit` reason.
+- Added regression coverage for non-applicable requests, unsupported methods, request limits, and insertion-point limits.
+
 ## 2.0.2 — Live-acceptance precision and packaging hardening
 
 ### Detector precision
