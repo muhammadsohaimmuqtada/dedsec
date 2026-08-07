@@ -1,6 +1,6 @@
 # DEDSEC — Evidence-Driven Reconnaissance & Application-Surface Research
 
-[![Version](https://img.shields.io/badge/version-2.0.0-4c8bf5?style=flat-square)](https://github.com/muhammadsohaimmuqtada/dedsec)
+[![Version](https://img.shields.io/badge/version-2.0.1-4c8bf5?style=flat-square)](https://github.com/muhammadsohaimmuqtada/dedsec)
 [![Python](https://img.shields.io/badge/Python-3.8--3.13-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![CI](https://img.shields.io/github/actions/workflow/status/muhammadsohaimmuqtada/dedsec/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/muhammadsohaimmuqtada/dedsec/actions)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
@@ -13,9 +13,9 @@ DEDSEC is intentionally conservative. A successful request, a template match, a 
 
 ## Project status
 
-| Component | DEDSEC 2.0 |
+| Component | DEDSEC 2.0.1 |
 | --- | --- |
-| Package | `2.0.0` |
+| Package | `2.0.1` |
 | Built-in modules | `24` |
 | Report schema | `3.0` |
 | Python | `3.8`–`3.13` |
@@ -27,7 +27,7 @@ DEDSEC is intentionally conservative. A successful request, a template match, a 
 | Authentication | Explicit researcher-supplied header/basic/bearer/API-key/cookie/workflow profiles |
 | API input | OpenAPI 3 / Swagger 2 request-corpus import |
 | Persistent research | Redacted SQLite project history, checkpoints, resume, and cross-scan diff |
-| Extensibility | Validated Python entry-point plugins + declarative checks |
+| Extensibility | Declarative checks + explicit opt-in validated Python entry-point plugins |
 | Output | JSON, JSONL, SARIF, CSV, HTML |
 | Finding model | Observation → candidate/hypothesis → verified finding |
 
@@ -215,7 +215,7 @@ Importing a schema does **not** execute its `POST`, `PUT`, `PATCH`, or `DELETE` 
 dedsec --plan examples/scan-plan.example.yml
 ```
 
-Plans can define target, modules, host/port/path scope, discovery limits, traffic budgets, maximum impact, project storage, templates, authentication profile, API schemas, and exports.
+Plans can define target, modules, host/port/path scope, discovery limits, traffic budgets, maximum impact, project storage, templates, authentication profile, API schemas, and exports. Relative file and directory paths are resolved from the scan plan's own directory, so the same plan behaves consistently regardless of the caller's current working directory.
 
 Impact classes are ordered:
 
@@ -281,7 +281,11 @@ See [`docs/TEMPLATES.md`](docs/TEMPLATES.md).
 dedsec https://example.com --deep --browser
 ```
 
-The browser adapter observes SPA/browser requests and navigable links. It does not auto-submit forms or click mutation controls. Sensitive browser headers are restricted to the exact configured target origin; cookie profiles are installed for that target URL rather than copied as a global browser header.
+The browser adapter observes SPA/browser requests and navigable links. It does not auto-submit forms or click mutation controls. Out-of-scope browser requests are aborted before send, non-idempotent browser requests are recorded but blocked by default, and researcher-supplied auth headers are injected only for the exact configured target origin. Cookie profiles are installed for that target URL rather than copied as a global browser header.
+
+## External Python plugins
+
+Built-in modules and declarative templates do not require external Python plugin discovery. Installed `dedsec.modules` entry points are not enumerated or imported during ordinary scans. Researchers who intentionally trust installed third-party plugin packages may opt in with `DEDSEC_ENABLE_PLUGINS=1`.
 
 ## Scope
 
@@ -294,7 +298,7 @@ Scan plans additionally support:
 - path include globs/regexes;
 - path exclude globs/regexes.
 
-Path exclusions are applied before path inclusions. Redirects are manually followed only while the destination remains in scope.
+Path exclusions are applied before path inclusions. URL paths are conservatively decoded and dot-normalized before policy matching. Redirects are manually followed only while the destination remains in scope.
 
 ## Reachability and adaptive resilience
 
@@ -328,7 +332,7 @@ dedsec https://example.com \
   --export-dir ./reports
 ```
 
-The canonical report schema is JSON `3.0`. Other formats are derived from that report.
+The canonical report schema is JSON `3.0`. Other formats are derived from that report. CSV output neutralizes spreadsheet-formula cells, and export basenames cannot escape the configured output directory.
 
 ## Runtime guarantees and boundaries
 
