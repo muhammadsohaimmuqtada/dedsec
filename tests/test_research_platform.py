@@ -2,15 +2,13 @@ import json
 import os
 import tempfile
 import unittest
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import requests
 
 from dedsec.core.api_import import OpenAPIImporter
 from dedsec.core.audit import AuditConfig, AuditEngine
 from dedsec.core.auth import AuthManager, AuthProfile
-from dedsec.core.contracts import ModuleResult
 from dedsec.core.crawler import CrawlConfig, CrawlerEngine
 from dedsec.core.exporters import export_report
 from dedsec.core.module_registry import MODULES, module_map
@@ -25,7 +23,6 @@ from dedsec.core.scope import ScopePolicy
 from dedsec.core.templates import TemplateDefinition, TemplateRunner
 from dedsec.core.transport import RequestOutcome
 from dedsec.core.workspace import (
-    Observation,
     RequestRecord,
     ResearchWorkspace,
     ResponseRecord,

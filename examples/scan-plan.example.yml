@@ -44,13 +44,14 @@ project:
   diff: true
 
 templates:
+  # Relative paths are resolved from this plan file's directory.
   directories:
-    - ./examples/templates
+    - ./templates
   maximum_impact: active-safe
   max_templates: 100
 
 # auth:
-#   file: ./examples/auth-profile.example.yml
+#   file: ./auth-profile.example.yml
 
 exports:
   formats: [json, sarif, html]

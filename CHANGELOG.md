@@ -2,6 +2,37 @@
 
 All notable DEDSEC changes are documented here. The project is pre-1.0-semver-strict in maturity despite the 2.0 architecture label; compatibility is maintained where practical and breaking report-schema changes are explicitly versioned.
 
+## 2.0.1 — Release-gate and trust-boundary hardening
+
+### Release reliability
+
+- Fixed the post-2.0 merge CI blockers across the supported Python matrix.
+- Restored deterministic browser endpoint/cookie helpers required by the optional browser layer.
+- Preserved canonical URL-encoded redaction markers through repeated persistence redaction passes.
+- Made scope rejection diagnostics explicit for excluded hosts and disallowed ports.
+- Kept Ruff, compile, package installation, dependency checks, and CLI smoke tests as release gates.
+
+### Browser and scope safety
+
+- Browser requests are intercepted before send and fail closed outside configured scope.
+- Non-idempotent browser requests are recorded as discovered surfaces but are not executed by default.
+- Researcher-supplied browser authentication headers are bound to the exact target origin; cookies are installed as target-scoped browser cookies.
+- Browser request-corpus records retain identity references without persisting credential-bearing headers or bodies.
+- Scope path matching now performs conservative repeated URL decoding, slash normalization, and dot-segment normalization before include/exclude evaluation.
+- Scope scheme and port configuration is validated before execution.
+
+### Reproducibility and extensibility
+
+- Scan plans now reject unknown keys, validate impact relationships, and resolve file/directory paths relative to the plan file.
+- The shipped scan-plan example follows the same plan-relative path contract.
+- Installed third-party Python entry-point plugins are no longer enumerated/imported during ordinary scans; discovery requires explicit opt-in.
+
+### Reporting/export hardening
+
+- CSV export neutralizes spreadsheet-formula cells.
+- Export basenames cannot traverse outside the selected output directory.
+- Semantic insertion-point secret redaction is applied at shared persistence/report boundaries.
+
 ## 2.0.0 — Research-platform architecture
 
 ### Application knowledge

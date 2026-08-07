@@ -15,7 +15,10 @@ class ExampleConfigurationTests(unittest.TestCase):
         self.assertEqual(plan.target, "https://example.com")
         self.assertTrue(plan.discovery.enabled)
         self.assertEqual(plan.traffic.maximum_impact, "active-safe")
-        self.assertIn("./examples/templates", plan.templates.directories)
+        self.assertIn(
+            os.path.join(ROOT, "examples", "templates"),
+            plan.templates.directories,
+        )
 
     def test_example_auth_profile_is_valid_placeholder_only(self):
         profile = AuthProfile.load(
