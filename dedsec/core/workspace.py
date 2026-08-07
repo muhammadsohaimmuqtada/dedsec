@@ -453,12 +453,17 @@ class Observation:
 class CoverageTracker:
     requests_discovered: int = 0
     requests_observed: int = 0
+    requests_audit_eligible: int = 0
+    requests_not_applicable: int = 0
     requests_audited: int = 0
     requests_skipped: int = 0
     insertion_points_discovered: int = 0
+    insertion_points_audit_eligible: int = 0
+    insertion_points_not_applicable: int = 0
     insertion_points_audited: int = 0
     insertion_points_skipped: int = 0
     skipped_reasons: Dict[str, int] = field(default_factory=dict)
+    not_applicable_reasons: Dict[str, int] = field(default_factory=dict)
 
     def discover_request(self, insertion_points: int = 0) -> None:
         self.requests_discovered += 1
@@ -479,16 +484,20 @@ class CoverageTracker:
 
     def snapshot(self) -> Dict[str, Any]:
         request_coverage = 0.0
-        if self.requests_discovered:
-            request_coverage = self.requests_audited / float(self.requests_discovered)
+        if self.requests_audit_eligible:
+            request_coverage = self.requests_audited / float(self.requests_audit_eligible)
         insertion_coverage = 0.0
-        if self.insertion_points_discovered:
+        if self.insertion_points_audit_eligible:
             insertion_coverage = self.insertion_points_audited / float(
-                self.insertion_points_discovered
+                self.insertion_points_audit_eligible
             )
         data = asdict(self)
         data["request_audit_coverage"] = round(request_coverage, 4)
         data["insertion_point_audit_coverage"] = round(insertion_coverage, 4)
+        data["request_audit_coverage_denominator"] = "requests_audit_eligible"
+        data["insertion_point_audit_coverage_denominator"] = (
+            "insertion_points_audit_eligible"
+        )
         return data
 
 
@@ -651,8 +660,15 @@ class ResearchWorkspace:
             identity = IdentityContext(**raw)
             self.identities[identity.id] = identity
         coverage = snapshot.get("coverage") or {}
+        scan_local_audit_fields = {
+            "requests_audit_eligible",
+            "requests_not_applicable",
+            "insertion_points_audit_eligible",
+            "insertion_points_not_applicable",
+            "not_applicable_reasons",
+        }
         for key in asdict(self.coverage):
-            if key in coverage:
+            if key in coverage and key not in scan_local_audit_fields:
                 setattr(self.coverage, key, coverage[key])
         self.metadata.update(snapshot.get("metadata") or {})
 
