@@ -1,6 +1,6 @@
 # DEDSEC — Evidence-Driven Reconnaissance & Application-Surface Research
 
-[![Version](https://img.shields.io/badge/version-2.0.1-4c8bf5?style=flat-square)](https://github.com/muhammadsohaimmuqtada/dedsec)
+[![Version](https://img.shields.io/badge/version-2.0.2-4c8bf5?style=flat-square)](https://github.com/muhammadsohaimmuqtada/dedsec)
 [![Python](https://img.shields.io/badge/Python-3.8--3.13-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![CI](https://img.shields.io/github/actions/workflow/status/muhammadsohaimmuqtada/dedsec/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/muhammadsohaimmuqtada/dedsec/actions)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
@@ -13,9 +13,9 @@ DEDSEC is intentionally conservative. A successful request, a template match, a 
 
 ## Project status
 
-| Component | DEDSEC 2.0.1 |
+| Component | DEDSEC 2.0.2 |
 | --- | --- |
-| Package | `2.0.1` |
+| Package | `2.0.2` |
 | Built-in modules | `24` |
 | Report schema | `3.0` |
 | Python | `3.8`–`3.13` |

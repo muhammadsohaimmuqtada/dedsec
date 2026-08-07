@@ -2,6 +2,19 @@
 
 All notable DEDSEC changes are documented here. The project is pre-1.0-semver-strict in maturity despite the 2.0 architecture label; compatibility is maintained where practical and breaking report-schema changes are explicitly versioned.
 
+## 2.0.2 — Live-acceptance precision and packaging hardening
+
+### Detector precision
+
+- Sitemap discovery now requires a well-formed XML `urlset` or `sitemapindex` root instead of treating every HTTP 200 response as sitemap evidence.
+- Sitemap candidates matching the target soft-404/application-shell profile are rejected before structural promotion.
+- Added regression coverage for namespaced `urlset`, `sitemapindex`, HTML SPA fallbacks, malformed XML, and soft-404 precedence.
+
+### Packaging reliability
+
+- Setuptools package discovery is explicitly constrained to `dedsec*`, excluding repository `tests`, live `testing` artifacts, and examples.
+- CI now creates a root `testing/live-artifacts` directory before editable installation so the real Kali packaging failure is continuously reproduced across the supported Python matrix.
+
 ## 2.0.1 — Release-gate and trust-boundary hardening
 
 ### Release reliability
