@@ -21,6 +21,7 @@ _ASSIGNMENT = re.compile(
     r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization)\s*[:=]\s*([^\s,;]+)"
 )
 _ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+_REDACTED_VALUES = {"[REDACTED]", "%5BREDACTED%5D"}
 
 
 def _utc_now() -> str:
@@ -37,21 +38,57 @@ def _json_bytes(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _is_secret_key(key: Optional[str]) -> bool:
+    if not key:
+        return False
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", str(key)).strip("_")
+    return bool(_SECRET_KEYS.search(normalized))
+
+
 def strip_ansi(value: str) -> str:
     return _ANSI_ESCAPE.sub("", value or "")
+
+
+def _redact_assignment(match: re.Match) -> str:
+    existing = str(match.group(2))
+    if existing.upper() in _REDACTED_VALUES:
+        return match.group(0)
+    return "%s=[REDACTED]" % match.group(1)
 
 
 def redact_text(value: str) -> str:
     value = strip_ansi(value)
     value = _BEARER.sub("Bearer [REDACTED]", value)
-    return _ASSIGNMENT.sub(lambda match: "%s=[REDACTED]" % match.group(1), value)
+    return _ASSIGNMENT.sub(_redact_assignment, value)
 
 
 def redact_value(value: Any, key: Optional[str] = None) -> Any:
-    if key and _SECRET_KEYS.search(key.replace("-", "_")):
+    """Recursively redact secrets, including semantically named insertion points.
+
+    Generic key-based recursion is insufficient for records shaped like
+    ``{"location": "json", "name": "password", "value": "..."}``, because
+    the sensitive meaning lives in ``name`` rather than the literal ``value``
+    key. Cookie insertion-point values are always treated as authentication
+    material. This function is used at persistence/report boundaries.
+    """
+    if _is_secret_key(key):
         return "[REDACTED]"
     if isinstance(value, dict):
-        return {str(k): redact_value(v, str(k)) for k, v in value.items()}
+        location = str(value.get("location") or "").strip().lower()
+        point_name = str(value.get("name") or "")
+        insertion_secret = bool(
+            "value" in value
+            and location in {"cookie", "header", "query", "body", "json", "path"}
+            and (location == "cookie" or _is_secret_key(point_name))
+        )
+        redacted: Dict[str, Any] = {}
+        for raw_key, item in value.items():
+            item_key = str(raw_key)
+            if insertion_secret and item_key == "value":
+                redacted[item_key] = "[REDACTED]"
+            else:
+                redacted[item_key] = redact_value(item, item_key)
+        return redacted
     if isinstance(value, list):
         return [redact_value(item) for item in value]
     if isinstance(value, tuple):
@@ -95,7 +132,6 @@ class EvidenceStore:
             "status": result.status,
             "data": result.data,
             "error": result.error,
-            # Terminal color control sequences are presentation metadata, not evidence.
             "output": strip_ansi(result.output or ""),
             "attempts": result.attempts,
             "failure_class": result.failure_class,
