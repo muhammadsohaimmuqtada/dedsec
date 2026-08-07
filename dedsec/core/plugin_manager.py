@@ -1,4 +1,5 @@
 import importlib
+import os
 from dataclasses import asdict, dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -18,9 +19,10 @@ class PluginRegistration:
 
 
 class PluginManager:
-    """Validated plugin registry with explicit diagnostics and entry-point discovery."""
+    """Validated plugin registry with explicit diagnostics and opt-in discovery."""
 
     ENTRY_POINT_GROUP = "dedsec.modules"
+    ENABLE_ENV = "DEDSEC_ENABLE_PLUGINS"
 
     def __init__(self):
         self._plugins: Dict[str, PluginRegistration] = {}
@@ -83,7 +85,22 @@ class PluginManager:
             )
             return False
 
-    def discover_entry_points(self) -> int:
+    @classmethod
+    def _environment_enabled(cls) -> bool:
+        value = os.environ.get(cls.ENABLE_ENV, "").strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    def discover_entry_points(self, enabled: Optional[bool] = None) -> int:
+        """Discover installed third-party plugins only after explicit opt-in.
+
+        Importing an entry point executes third-party package code. Ordinary
+        built-in scans therefore do not enumerate or import external plugins.
+        Callers may pass ``enabled=True`` or set ``DEDSEC_ENABLE_PLUGINS=1``.
+        """
+        if enabled is None:
+            enabled = self._environment_enabled()
+        if not enabled:
+            return 0
         try:
             entry_points = importlib_metadata.entry_points()
             if hasattr(entry_points, "select"):
@@ -92,7 +109,12 @@ class PluginManager:
                 candidates = entry_points.get(self.ENTRY_POINT_GROUP, [])
         except Exception as exc:
             self._errors.append(
-                {"key": "*", "import_path": "", "source": "entry-points", "error": str(exc)}
+                {
+                    "key": "*",
+                    "import_path": "",
+                    "source": "entry-points",
+                    "error": "%s: %s" % (exc.__class__.__name__, exc),
+                }
             )
             return 0
 
@@ -100,18 +122,18 @@ class PluginManager:
         for entry in candidates:
             try:
                 module = entry.load()
-                import_path = getattr(module, "__name__", None) or str(entry.value)
+                import_path = getattr(module, "__name__", None) or str(entry.value).split(":", 1)[0]
                 declared = getattr(module, "METADATA", None)
                 if not isinstance(declared, ModuleMetadata):
                     raise ValueError("Entry-point plugin must expose ModuleMetadata as METADATA")
-                if self.register_plugin(
-                    declared.key,
-                    import_path,
-                    declared.display_name,
+                if declared.key in self._plugins:
+                    raise ValueError("Plugin key already registered: %s" % declared.key)
+                self._plugins[declared.key] = PluginRegistration(
                     metadata=declared,
+                    import_path=import_path,
                     source="entry-point:%s" % entry.name,
-                ):
-                    added += 1
+                )
+                added += 1
             except Exception as exc:
                 self._errors.append(
                     {
